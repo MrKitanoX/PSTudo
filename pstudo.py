@@ -366,6 +366,16 @@ def mensagem_erro(e):
 
 
 # =============================================================== desenho
+FUNDO_GRANDE = {}     # (w, h) -> fundo PIL no tamanho da tela inteira, feito em segundo plano
+
+
+def preparar_fundo_grande(w, h, escala):
+    try:
+        FUNDO_GRANDE[(w, h)] = Pintor(escala).fundo_pil(w, h)
+    except Exception:
+        pass
+
+
 class Pintor:
     """Gera imagens com cantos arredondados, brilho e ícones (supersampling 4x)."""
 
@@ -380,14 +390,17 @@ class Pintor:
         chave = ("ret", w, h, r, fill, outline, largura, glow, glow_r, icone, icone_y)
         if chave in self.cache:
             return self.cache[chave]
-        k = 4
         g = self.px(glow_r) if glow else 0
         W_, H_ = self.px(w) + 2 * g, self.px(h) + 2 * g
+        k = 4 if max(W_, H_) <= 320 else 2      # painéis grandes: 2x já deixa os cantos lisos
         img = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
         if glow:
-            gl = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
-            ImageDraw.Draw(gl).rounded_rectangle([g, g, W_ - g, H_ - g], self.px(r), fill=glow)
-            img = Image.alpha_composite(img, gl.filter(ImageFilter.GaussianBlur(g / 2.2)))
+            d4 = 4                               # o brilho é desfocado: dá para calcular em 1/4
+            gl = Image.new("RGBA", (max(2, W_ // d4), max(2, H_ // d4)), (0, 0, 0, 0))
+            ImageDraw.Draw(gl).rounded_rectangle([g / d4, g / d4, (W_ - g) / d4, (H_ - g) / d4],
+                                                 self.px(r) / d4, fill=glow)
+            gl = gl.filter(ImageFilter.GaussianBlur(g / 2.2 / d4)).resize((W_, H_), Image.BILINEAR)
+            img = Image.alpha_composite(img, gl)
         big = Image.new("RGBA", (W_ * k, H_ * k), (0, 0, 0, 0))
         d = ImageDraw.Draw(big)
         lw = max(1, round(self.px(largura) * k)) if outline else 0
@@ -450,7 +463,8 @@ class Pintor:
             r = 4.5 * u
             d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=cores[tipo])
 
-    def fundo(self, w, h):
+    def fundo_pil(self, w, h):
+        """Fundo da janela como imagem PIL (pode rodar em outra thread)."""
         W_, H_ = self.px(w), self.px(h)
         rnd = random.Random(7)
         # gradiente base
@@ -458,13 +472,16 @@ class Pintor:
         for y in range(256):
             t = y / 255
             grad.putpixel((0, y), (int(9 - 6 * t), int(24 - 18 * t), int(58 - 46 * t)))
-        img = grad.resize((W_, H_)).convert("RGBA")
-        # brilho azul no canto
-        gl = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+        img = grad.resize((W_, H_), Image.BILINEAR).convert("RGBA")
+        # brilho azul no canto (feito em 1/8 do tamanho e ampliado: é todo desfocado, fica igual)
+        d8 = 8
+        w8, h8 = max(2, W_ // d8), max(2, H_ // d8)
+        gl = Image.new("RGBA", (w8, h8), (0, 0, 0, 0))
         dg = ImageDraw.Draw(gl)
-        dg.ellipse([W_ * 0.45, -H_ * 0.55, W_ * 1.35, H_ * 0.55], fill=(0, 112, 209, 110))
-        dg.ellipse([-W_ * 0.3, H_ * 0.65, W_ * 0.35, H_ * 1.4], fill=(40, 70, 160, 55))
-        img = Image.alpha_composite(img, gl.filter(ImageFilter.GaussianBlur(self.px(120))))
+        dg.ellipse([w8 * 0.45, -h8 * 0.55, w8 * 1.35, h8 * 0.55], fill=(0, 112, 209, 110))
+        dg.ellipse([-w8 * 0.3, h8 * 0.65, w8 * 0.35, h8 * 1.4], fill=(40, 70, 160, 55))
+        gl = gl.filter(ImageFilter.GaussianBlur(self.px(120) / d8)).resize((W_, H_), Image.BILINEAR)
+        img = Image.alpha_composite(img, gl)
         # ondas suaves
         ondas = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
         do = ImageDraw.Draw(ondas)
@@ -485,6 +502,16 @@ class Pintor:
             r = rnd.uniform(1, 3.5) * self.s
             dp.ellipse([x - r, y - r, x + r, y + r], fill=(180, 215, 255, rnd.randint(25, 90)))
         img = Image.alpha_composite(img, part.filter(ImageFilter.GaussianBlur(self.px(1.2))))
+        return img
+
+    def fundo(self, w, h):
+        """Usa o fundo grande já pronto (feito em segundo plano) e só reduz: maximizar fica rápido."""
+        W_, H_ = self.px(w), self.px(h)
+        base = FUNDO_GRANDE.get((w, h))
+        if base is not None and base.width >= W_:
+            img = base if base.width == W_ else base.resize((W_, H_), Image.BILINEAR, reducing_gap=2.0)
+        else:
+            img = self.fundo_pil(w, h)
         return ImageTk.PhotoImage(img)
 
 
@@ -1251,6 +1278,21 @@ class Extras:
         self.fm_off = int(max(0, min(self.fm_off, self._fm_total() - vis)))
 
     def _fm_redesenhar(self):
+        # a barra de rolagem do CTk processa eventos ao se redesenhar: sem esta trava a lista era
+        # desenhada por cima dela mesma
+        if getattr(self, "_fm_desenhando", False):
+            self._fm_de_novo = True
+            return
+        self._fm_desenhando = True
+        try:
+            self._fm_redesenhar_agora()
+        finally:
+            self._fm_desenhando = False
+        if getattr(self, "_fm_de_novo", False):
+            self._fm_de_novo = False
+            self.root.after_idle(self._fm_redesenhar)
+
+    def _fm_redesenhar_agora(self):
         if not self._fm_ativo():
             return
         cv, p = self.fm_cv, self.p
@@ -4385,6 +4427,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
             escala = 1.0
         self.escala_base = escala
         self.p = Pintor(escala)
+        self._pintores = {round(escala, 3): self.p}     # imagens prontas de cada tamanho de janela
         p = self.p
         self.root.configure(fg_color="#050B18")
         self.c = tk.Canvas(self.root, width=p.px(W), height=p.px(H), highlightthickness=0, bd=0, bg="#050b18")
@@ -4417,6 +4460,10 @@ class App(Extras, Console, Controles, Tela, Conversor):
         tk.Wm.wm_geometry(self.root, f"{p.px(W)}x{p.px(H)}")
         tk.Wm.wm_minsize(self.root, int(p.px(W) * 0.6), int(p.px(H) * 0.6))
         self.root.bind("<Configure>", self._janela_mudou, add="+")
+        # em segundo plano: fundo já no tamanho da tela inteira, para o maximizar não travar
+        esc_tela = min(self.root.winfo_screenwidth() / W, self.root.winfo_screenheight() / H)
+        self.root.after(1200, lambda: threading.Thread(target=preparar_fundo_grande, args=(W, H, esc_tela),
+                                                       daemon=True).start())
 
         self.tela_inicio()
         self.root.after(50, self.ler_fila)
@@ -4931,7 +4978,14 @@ class App(Extras, Console, Controles, Tela, Conversor):
             return
         if getattr(self, "_espera_tam", None):
             self.root.after_cancel(self._espera_tam)
-        self._espera_tam = self.root.after(220, self._ajustar_escala)
+        try:
+            estado = self.root.state()
+        except tk.TclError:
+            estado = ""
+        mudou_estado = estado != getattr(self, "_estado_janela", estado)
+        self._estado_janela = estado
+        # maximizar/restaurar: refaz já; arrastando a borda: espera parar de mexer
+        self._espera_tam = self.root.after(1 if mudou_estado else 160, self._ajustar_escala)
 
     def _ajustar_escala(self):
         self._espera_tam = None
@@ -4948,7 +5002,8 @@ class App(Extras, Console, Controles, Tela, Conversor):
 
     def _reconstruir(self, escala):
         self.limpar()
-        self.p = Pintor(escala)
+        pintores = self.__dict__.setdefault("_pintores", {})
+        self.p = pintores.setdefault(round(escala, 3), Pintor(escala))   # imagens já feitas ficam guardadas
         try:
             ctk.set_widget_scaling(escala / self.escala_base)
         except Exception:
