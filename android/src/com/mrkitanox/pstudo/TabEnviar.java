@@ -42,6 +42,7 @@ public class TabEnviar {
     private long enviado, total;
     private int idx, qtd;
     private String jogoAtual = "";
+    private volatile String instalando = null;     // texto enquanto o webMAN instala os .pkg
     private long inicio;
     // telas
     private TextView txJogo, txSub, txPct, txRest, txExtra;
@@ -348,10 +349,42 @@ public class TabEnviar {
                             }
                         }
                     }
+                    // .pkg mandado para /dev_hdd0/packages: o webMAN instala na hora, um de cada vez
+                    List<String[]> pkgs = new ArrayList<String[]>();
+                    for (Object[] pl : planos) {
+                        @SuppressWarnings("unchecked") List<Object[]> arqs = (List<Object[]>) pl[1];
+                        for (Object[] f : arqs) {
+                            String r = (String) f[1];
+                            if (r.toLowerCase(java.util.Locale.ROOT).endsWith(".pkg") && r.startsWith("/dev_hdd0/packages/"))
+                                pkgs.add(new String[]{((Item) pl[0]).nome, r});
+                        }
+                    }
+                    int instalados = 0;
+                    boolean manual = false;
+                    Ftp[] con = {ftp};
+                    try {
+                        for (int k = 0; k < pkgs.size(); k++) {
+                            if (cancelar) throw new Cancelado();
+                            instalando = "Instalando no PS3" + (pkgs.size() > 1 ? " (" + (k + 1) + " de " + pkgs.size() + ")" : "");
+                            jogoAtual = pkgs.get(k)[0];
+                            a.ui(new Runnable() { public void run() { mostrarProgresso(); } });
+                            if (!Updates.instalarPkg(a, con, pkgs.get(k)[1], pkgs.get(k)[0], new Updates.Parar() {
+                                public void checar() throws IOException { if (cancelar) throw new Cancelado(); }
+                            }, null)) { manual = true; break; }
+                            instalados++;
+                        }
+                    } finally {
+                        ftp = con[0];
+                        instalando = null;
+                    }
                     final int n = planos.size();
                     final long min = Math.max(1, Math.round((System.currentTimeMillis() - inicio) / 60000.0));
-                    terminar("fim", "Tudo pronto!", n + (n == 1 ? " jogo enviado" : " jogos enviados") + " para o PS3 em " + min + " min.",
-                            "Toque em Atualizar jogos no XMB para eles aparecerem (o PS3 precisa estar no XMB, fora de jogo).");
+                    String sub = n + (n == 1 ? " jogo enviado" : " jogos enviados") + " para o PS3 em " + min + " min.";
+                    if (instalados > 0)
+                        sub = n + (n == 1 ? " item enviado" : " itens enviados") + " e " + instalados + " pacote(s) instalado(s) no PS3 em " + min + " min.";
+                    terminar("fim", "Tudo pronto!", sub, manual
+                            ? "Os .pkg ficaram em /dev_hdd0/packages: este webMAN não instala sozinho. No PS3, abra Package Manager › Install Package Files › Standard."
+                            : "Toque em Atualizar jogos no XMB para eles aparecerem (o PS3 precisa estar no XMB, fora de jogo).");
                 } catch (Cancelado c) {
                     terminar("fila", null, null, null);
                 } catch (final Exception e) {
@@ -390,11 +423,19 @@ public class TabEnviar {
     private void mostrarProgresso() {
         float f = Math.min(1f, enviado / (float) Math.max(1, total));
         int pct = (int) (f * 100);
-        a.marcarAba(0, enviando ? "↑ " + pct + "%" : null);
+        a.marcarAba(0, enviando ? (instalando != null ? "Instalando" : "↑ " + pct + "%") : null);
         if (txPct == null || a.abaAtual() != 0 || !"enviando".equals(modo)) return;
         txPct.setText(pct + "%");
         barra.set(f);
         if (!jogoAtual.isEmpty()) txJogo.setText(jogoAtual);
+        String inst = instalando;
+        if (inst != null) {
+            txPct.setText("100%");
+            barra.set(1f);
+            txSub.setText(inst);
+            txRest.setText("O andamento aparece na tela do PS3. Fique no XMB, sem abrir jogos.");
+            return;
+        }
         txSub.setText(qtd > 1 ? "Jogo " + idx + " de " + qtd : "");
         double dt = (System.currentTimeMillis() - inicio) / 1000.0;
         if (dt > 3 && enviado > 0) {

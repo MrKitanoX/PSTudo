@@ -469,39 +469,14 @@ public class TabUpdates {
         });
     }
 
-    private Ftp garantirConexao(Ftp f) {
-        try { f.cmd("NOOP"); return f; } catch (IOException e) {
-            f.fechar();
-            try { return a.conectar(); } catch (IOException e2) { return f; }
-        }
-    }
+    private Ftp garantirConexao(Ftp f) { return Updates.garantirConexao(a, f); }
 
-    /** Pede ao webMAN para instalar e espera terminar (o webMAN apaga o .pkg depois de instalar).
-        false = este webMAN não instala .pkg sozinho. */
-    private boolean instalarNoPs3(Ftp[] con, String ip, String id, Updates.Pacote pk, String destino) throws IOException {
-        try {
-            WebMan.http(ip, "install.ps3" + WebMan.url(destino), 30000);
-        } catch (WebMan.ErroHttp e) {
-            if (e.codigo == 400) throw new IOException("o PS3 recusou instalar a versão " + pk.versao
-                    + ". Saia do jogo (fique no XMB) e confira o espaço livre.");
-            return false;
-        } catch (SocketTimeoutException ignored) {
-            // o pedido chegou; o PS3 só demorou para responder
-        }
-        long limite = System.currentTimeMillis() + 30 * 60 * 1000L;
-        while (System.currentTimeMillis() < limite) {
-            if (cancelar) throw new IOException("cancelado");
-            try { Thread.sleep(3000); } catch (InterruptedException e) { break; }
-            try {
-                boolean existe = con[0].existeOuErro(destino);
-                if (!existe || Updates.comparar(Updates.versaoInstalada(con[0], id), pk.versao) >= 0) {
-                    try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
-                    return true;
-                }
-            } catch (IOException e) {
-                con[0] = garantirConexao(con[0]);     // o PS3 fica ocupado instalando
-            }
-        }
-        throw new IOException("a instalação da versão " + pk.versao + " não terminou em 30 minutos");
+    private boolean instalarNoPs3(Ftp[] con, String ip, final String id, final Updates.Pacote pk, String destino)
+            throws IOException {
+        return Updates.instalarPkg(a, con, destino, "a versão " + pk.versao, new Updates.Parar() {
+            public void checar() throws IOException { if (cancelar) throw new IOException("cancelado"); }
+        }, new Updates.Pronto() {
+            public boolean pronto(Ftp f) { return Updates.comparar(Updates.versaoInstalada(f, id), pk.versao) >= 0; }
+        });
     }
 }

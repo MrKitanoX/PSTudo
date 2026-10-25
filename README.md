@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| **Enviar jogos** | Envia jogos em pasta (BLUS, BLES…), ISOs e PKGs pela rede. Encontra o PS3 sozinho, mostra o nome real do jogo, escolhe a pasta certa (GAMES, PS3ISO, packages) e não reenvia o que já está no console. Dá para usar as outras abas durante o envio, um som avisa quando termina e um botão atualiza a lista de jogos e recarrega o XMB. |
+| **Enviar jogos** | Envia jogos em pasta (BLUS, BLES…), ISOs e PKGs pela rede. Encontra o PS3 sozinho, mostra o nome real do jogo, escolhe a pasta certa (GAMES, PS3ISO, packages) e não reenvia o que já está no console. Os `.pkg` são instalados na hora pelo webMAN, um de cada vez. Dá para usar as outras abas durante o envio, um som avisa quando termina e um botão atualiza a lista de jogos e recarrega o XMB. |
 | **Converter para ISO** | Transforma jogos em pasta em ISO (com o `makeps3iso`) e, de forma experimental, PKGs de jogos de disco em ISO. |
 | **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), marcar vários itens de uma vez, enviar, baixar, renomear, criar pastas, apagar e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |

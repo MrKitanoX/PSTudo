@@ -310,6 +310,47 @@ def tamanho_remoto(ftp, caminho):
         return None
 
 
+def instalar_pkg_ps3(cfg, ftp, caminho, cancelar, nome="o pacote", pronto=None):
+    """Pede ao webMAN para instalar um .pkg que já está no PS3 e espera terminar
+    (o webMAN apaga o arquivo depois de instalar). O PS3 mostra o andamento na tela.
+    False = este webMAN não instala .pkg sozinho (aí é pelo Package Manager do PS3)."""
+    try:
+        http_webman(cfg.get("ip"), "install.ps3" + _url_caminho(caminho), timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code == 400:
+            raise RuntimeError(f"O PS3 recusou instalar {nome}. Saia do jogo (fique no XMB) "
+                               f"e confira o espaço livre.") from None
+        return False
+    except (socket.timeout, TimeoutError, ConnectionError):
+        pass                                    # o pedido chegou; o PS3 só demorou para responder
+    except urllib.error.URLError as e:
+        if not isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+            raise
+    fim = time.time() + 30 * 60
+    while time.time() < fim:
+        if cancelar is not None and cancelar.is_set():
+            raise Cancelado()
+        time.sleep(3)
+        try:
+            ftp.voidcmd("TYPE I")
+            try:
+                ftp.size(caminho)
+                sumiu = False
+            except ftplib.error_perm:          # 550 = o arquivo não existe mais
+                sumiu = True
+            if sumiu or (pronto is not None and pronto(ftp)):
+                time.sleep(2)
+                return True
+        except ftplib.all_errors:              # o PS3 fica ocupado instalando: conecta de novo
+            try:
+                ftp.close()
+                ftp.connect(cfg["ip"], int(cfg.get("porta", 21)), timeout=30)
+                ftp.login(cfg.get("usuario") or "anonymous", cfg.get("senha") or "")
+            except ftplib.all_errors:
+                pass
+    raise RuntimeError(f"A instalação de {nome} não terminou em 30 minutos. Confira no PS3 em Package Manager.")
+
+
 def trabalho_envio(fila_jogos, cfg, cancelar, avisar):
     """Roda em outra thread. fila_jogos = [{'item','nome'}]."""
     ftp = None
@@ -341,7 +382,22 @@ def trabalho_envio(fila_jogos, cfg, cancelar, avisar):
 
                 with open(local, "rb") as f:
                     ftp.storbinary(f"STOR {remoto}", f, blocksize=BLOCO, callback=cb)
-        avisar("fim", (len(planos), enviado, time.time() - inicio))
+        # .pkg mandado para /dev_hdd0/packages: o webMAN instala na hora, um de cada vez
+        pkgs = [(nome, remoto) for nome, lista in planos for _l, remoto, _t in lista
+                if remoto.lower().endswith(".pkg") and remoto.startswith("/dev_hdd0/packages/")]
+        instalados, manual = 0, False
+        if cfg.get("instalar_pkg", True):
+            for i, (nome, remoto) in enumerate(pkgs, 1):
+                if cancelar.is_set():
+                    raise Cancelado()
+                avisar("instalando", (i, len(pkgs), nome))
+                if not instalar_pkg_ps3(cfg, ftp, remoto, cancelar, nome):
+                    manual = True
+                    break
+                instalados += 1
+        else:
+            manual = bool(pkgs)
+        avisar("fim", (len(planos), enviado, time.time() - inicio, instalados, manual))
     except Cancelado:
         avisar("cancelado", None)
     except Exception as e:
@@ -5617,45 +5673,9 @@ class Updates:
         threading.Thread(target=rodar, daemon=True).start()
 
     def _up_instalar(self, ftp, ip, tid, pk, destino, cancelar):
-        """Pede ao webMAN para instalar o .pkg e espera terminar (o webMAN apaga o arquivo depois de instalar).
-        False = este webMAN não instala .pkg sozinho (o usuário instala pelo Package Manager)."""
-        try:
-            http_webman(ip, "install.ps3" + _url_caminho(destino), timeout=30)
-        except urllib.error.HTTPError as e:
-            if e.code == 400:
-                raise RuntimeError(f"O PS3 recusou instalar a versão {pk['versao']}. Saia do jogo (fique no XMB) "
-                                   f"e confira o espaço livre.") from None
-            return False
-        except (socket.timeout, TimeoutError, ConnectionError):
-            pass
-        except urllib.error.URLError as e:
-            if not isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
-                raise
         alvo = versao_num(pk["versao"])
-        fim = time.time() + 30 * 60
-        while time.time() < fim:
-            if cancelar.is_set():
-                raise Cancelado()
-            time.sleep(3)
-            try:
-                ftp.voidcmd("TYPE I")
-                try:
-                    ftp.size(destino)
-                    sumiu = False
-                except ftplib.error_perm:          # 550 = o arquivo não existe mais
-                    sumiu = True
-                if sumiu or versao_num(versao_instalada(ftp, tid) or "0") >= alvo:
-                    time.sleep(2)
-                    return True
-            except ftplib.all_errors:              # o PS3 fica ocupado instalando: conecta de novo
-                try:
-                    ftp.close()
-                    ftp.connect(self.cfg["ip"], int(self.cfg.get("porta", 21)), timeout=30)
-                    ftp.login(self.cfg.get("usuario") or "anonymous", self.cfg.get("senha") or "")
-                except ftplib.all_errors:
-                    pass
-        raise RuntimeError(f"A instalação da versão {pk['versao']} não terminou em 30 minutos. "
-                           "Confira no PS3 em Package Manager.")
+        return instalar_pkg_ps3(self.cfg, ftp, destino, cancelar, f"a versão {pk['versao']}",
+                                pronto=lambda f: versao_num(versao_instalada(f, tid) or "0") >= alvo)
 
     def _up_atualizar_versao(self, tid):
         def ok(v):
@@ -5958,6 +5978,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
         self.vendo_envio = True
         if getattr(self, "ultimo_prog", None):
             self._progresso(self.ultimo_prog)
+        if getattr(self, "instalando_info", None):
+            self._mostrar_instalando()
 
     def _atualizar_barra(self, frac):
         p = self.p
@@ -6069,6 +6091,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
             return
         self.enviando = True
         self.ultimo_prog = None
+        self.instalando_info = None
         self.envio_pendente = None
         self.cancelar.clear()
         self.salvar_cfg()
@@ -6093,7 +6116,21 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
             self._progresso(ultimo_prog)
         self.root.after(80, self.ler_fila)
 
+    def _mostrar_instalando(self):
+        i, n, nome = self.instalando_info
+        self._atualizar_aba_envio(1.0, "Instalando…")
+        if not getattr(self, "vendo_envio", False):
+            return
+        c = self.c
+        c.itemconfig(self.tx_jogo, text=nome if len(nome) <= 44 else nome[:42] + "…")
+        c.itemconfig(self.tx_sub, text=f"Instalando no PS3 ({i} de {n})" if n > 1 else "Instalando no PS3")
+        c.itemconfig(self.tx_pct, text="100%")
+        self._atualizar_barra(1.0)
+        c.itemconfig(self.tx_rest, text="O andamento aparece na tela do PS3. Fique no XMB, sem abrir jogos.")
+
     def _progresso(self, d):
+        if getattr(self, "instalando_info", None):
+            return
         self.ultimo_prog = d
         enviado, total, idx, n, nome, inicio = d
         frac = min(1.0, enviado / total)
@@ -6115,6 +6152,10 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
         if tipo == "cb":
             dados()
             return
+        if tipo == "instalando":
+            self.instalando_info = dados
+            self._mostrar_instalando()
+            return
         if tipo == "ps3":
             if dados:
                 self.cfg["ip"] = dados
@@ -6132,6 +6173,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
                 self.root.after(15000, self._loop_check)
         elif tipo in ("fim", "erro", "cancelado") and self.aba != "enviar":
             self.enviando = False
+            if tipo != "fim":
+                self.instalando_info = None
             self.ultimo_prog = None
             if tipo == "cancelado":
                 self._atualizar_aba_envio(None)
@@ -6139,8 +6182,9 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
             self.envio_pendente = (tipo, dados)
             if tipo == "fim":
                 self._som_fim()
-                self._atualizar_aba_envio(None, "Enviado ✓")
-                self._aviso_app(f"{dados[0]} {'jogo enviado' if dados[0] == 1 else 'jogos enviados'} para o PS3!")
+                self._atualizar_aba_envio(None, "Instalado ✓" if dados[3] else "Enviado ✓")
+                self._aviso_app(f"{dados[3]} pacote(s) instalado(s) no PS3!" if dados[3] else
+                                f"{dados[0]} {'jogo enviado' if dados[0] == 1 else 'jogos enviados'} para o PS3!")
             else:
                 self._atualizar_aba_envio(None, "Erro no envio")
                 self._aviso_app("O envio parou. Abra a aba Enviar jogos para ver.", "#F87171")
@@ -6150,20 +6194,29 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
             self.enviando = False
             self.ultimo_prog = None
             self._atualizar_aba_envio(None)
-            n, enviado, tempo = dados
+            n, enviado, tempo, instalados, manual = dados
             minutos = max(1, round(tempo / 60))
-            self.tela_final(True, "Tudo pronto!",
-                            f"{n} {'jogo enviado' if n == 1 else 'jogos enviados'} para o PS3 em {minutos} min.",
-                            "Clique em Atualizar jogos no XMB para eles aparecerem na lista (o PS3 precisa estar no XMB, "
-                            "fora de jogo).", botao_xmb=True)
+            sub = f"{n} {'jogo enviado' if n == 1 else 'jogos enviados'} para o PS3 em {minutos} min."
+            extra = ("Clique em Atualizar jogos no XMB para eles aparecerem na lista (o PS3 precisa estar no XMB, "
+                     "fora de jogo).")
+            if instalados:
+                sub = f"{n} {'item enviado' if n == 1 else 'itens enviados'} e {instalados} pacote(s) instalado(s) " \
+                      f"no PS3 em {minutos} min."
+            if manual:
+                extra = ("Os .pkg ficaram em /dev_hdd0/packages: este webMAN não instala sozinho. No PS3, abra "
+                         "Package Manager › Install Package Files › Standard.")
+            self.instalando_info = None
+            self.tela_final(True, "Tudo pronto!", sub, extra, botao_xmb=True)
         elif tipo == "cancelado":
             self.enviando = False
             self.ultimo_prog = None
+            self.instalando_info = None
             self._atualizar_aba_envio(None)
             self.tela_inicio()
         elif tipo == "erro":
             self.enviando = False
             self.ultimo_prog = None
+            self.instalando_info = None
             self._atualizar_aba_envio(None)
             titulo, sub = mensagem_erro(dados)
             self.tela_final(False, titulo, sub, f"Detalhe: {str(dados)[:120]}")

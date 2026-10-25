@@ -385,4 +385,46 @@ public final class Updates {
         if (versao != null && !versao.isEmpty() && comparar(versao, j.instalado.isEmpty() ? "0" : j.instalado) > 0)
             j.instalado = versao;
     }
+
+    // ---------------------------------------------------------------- instalar .pkg pelo webMAN
+    public interface Parar { void checar() throws IOException; }
+    public interface Pronto { boolean pronto(Ftp f); }
+
+    /** Confere se a conexão FTP ainda responde; se caiu, conecta de novo. */
+    public static Ftp garantirConexao(MainActivity a, Ftp f) {
+        try { f.cmd("NOOP"); return f; } catch (IOException e) {
+            f.fechar();
+            try { return a.conectar(); } catch (IOException e2) { return f; }
+        }
+    }
+
+    /** Pede ao webMAN para instalar um .pkg que já está no PS3 e espera terminar (o webMAN apaga o arquivo
+        depois de instalar; o PS3 mostra o andamento na tela). false = este webMAN não instala .pkg sozinho. */
+    public static boolean instalarPkg(MainActivity a, Ftp[] con, String caminho, String nome, Parar parar, Pronto pronto)
+            throws IOException {
+        try {
+            WebMan.http(a.ip(), "install.ps3" + WebMan.url(caminho), 30000);
+        } catch (WebMan.ErroHttp e) {
+            if (e.codigo == 400) throw new IOException("o PS3 recusou instalar " + nome
+                    + ". Saia do jogo (fique no XMB) e confira o espaço livre.");
+            return false;
+        } catch (java.net.SocketTimeoutException ignored) {
+            // o pedido chegou; o PS3 só demorou para responder
+        }
+        long limite = System.currentTimeMillis() + 30 * 60 * 1000L;
+        while (System.currentTimeMillis() < limite) {
+            parar.checar();
+            try { Thread.sleep(3000); } catch (InterruptedException e) { break; }
+            try {
+                boolean existe = con[0].existeOuErro(caminho);
+                if (!existe || (pronto != null && pronto.pronto(con[0]))) {
+                    try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
+                    return true;
+                }
+            } catch (IOException e) {
+                con[0] = garantirConexao(a, con[0]);     // o PS3 fica ocupado instalando
+            }
+        }
+        throw new IOException("a instalação de " + nome + " não terminou em 30 minutos");
+    }
 }
