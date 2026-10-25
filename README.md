@@ -35,6 +35,15 @@
   <img src="docs/imagens/tela.png" width="400" alt="Espelho da placa de captura">
 </p>
 
+## Android
+
+Também existe o **PSTudo para Android** (`PSTudo.apk` na página de [Releases](../../releases)), com as abas **Enviar jogos**, **Arquivos**, **Licenças** e **Console**. A aba Tela (placa de captura) e a conversão para ISO ficam só no PC.
+
+- Instale o APK no celular (o Android pede para permitir "instalar apps desconhecidos" para o app que abriu o arquivo).
+- O celular precisa estar no mesmo Wi-Fi do PS3. Durante um envio, deixe o app aberto: a tela fica ligada sozinha.
+- Em **Console › Controles**, os controles ligados no celular (cabo OTG ou Bluetooth) podem ser registrados no `xpad_devices.txt`.
+- Para gerar o APK: `android/build_apk.sh` (Linux, com os pacotes do Ubuntu listados no começo do script).
+
 ## Requisitos
 
 - **PS3 com HEN** e o **[webMAN MOD](https://github.com/aldostools/webMAN-MOD)** instalado. O PSTudo conversa com o console pelo FTP e pelos comandos web do webMAN.

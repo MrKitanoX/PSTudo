@@ -5008,6 +5008,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
             Cartao(self, W / 2 + 284, 340, 268, 230, "iso", "Converter para ISO", "Pasta ou PKG → ISO",
                    self.abrir_conversor)
             self.btn_enviar = None
+            self._botao_xmb_canto()
             return
 
         n = len(self.jogos)
@@ -5043,6 +5044,38 @@ class App(Extras, Console, Controles, Tela, Conversor):
         self.btn_enviar = Botao(self, W / 2 + 310 - 110, yb, 220, 54, "Enviar para o PS3", self.iniciar_envio,
                                 tamanho_fonte=16)
         self.btn_enviar.set_ativo(self.estado_ps3 == "ok")
+        self._botao_xmb_canto()
+
+    def _botao_xmb_canto(self):
+        """Botão pequeno no canto de baixo: atualizar a lista de jogos do XMB quando quiser."""
+        b = Botao(self, W - 24 - 70, 556, 140, 32, "⟳  Atualizar XMB", lambda: self._xmb_canto(b), "secundario",
+                  tamanho_fonte=12)
+        self.btn_xmb = b
+
+    def _xmb_canto(self, b):
+        if not b.ativo:
+            return
+        if self.estado_ps3 != "ok":
+            self._aviso_app("Conecte o PS3 primeiro.", "#FBBF24")
+            return
+        b.set_ativo(False)
+        b.set_texto("Atualizando…")
+        ip = self.cfg.get("ip")
+
+        def tarefa():
+            try:
+                ok = atualizar_xmb(ip)
+                msg, cor = (("XMB atualizado: os jogos novos já aparecem.", "#34D399") if ok else
+                            ("Lista de jogos atualizada. Saia e entre no usuário do PS3 para ver.", "#34D399"))
+            except Exception as e:
+                msg, cor = f"Não consegui atualizar o XMB ({str(e)[:50]}).", "#F87171"
+
+            def fim():
+                b.set_texto("⟳  Atualizar XMB")
+                b.set_ativo(True)
+                self._aviso_app(msg, cor)
+            self.fila.put(("cb", fim))
+        threading.Thread(target=tarefa, daemon=True).start()
 
     def tela_enviando(self):
         self.limpar()
