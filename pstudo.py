@@ -2009,6 +2009,57 @@ def instalar_xpad(ftp, arquivos):
     return mantidos
 
 
+LISTAS_BOOT = ("/dev_hdd0/boot_plugins.txt", "/dev_hdd0/boot_plugins_nocobra.txt", "/dev_hdd0/boot_plugins_dex.txt",
+               "/dev_hdd0/boot_plugins_nocobra_dex.txt", "/dev_hdd0/mamba_plugins.txt", "/dev_hdd0/prx_plugins.txt",
+               "/dev_hdd0/game/PRXLOADER/USRDIR/plugins.txt")
+
+
+def _eh_xpad(texto):
+    t = texto.lower()
+    return "ps3xpad" in t or "xpad_vsh" in t or "xpad_game" in t or "/xpad.sprx" in t
+
+
+def desinstalar_xpad(ftp, pasta_backup):
+    """Remove o XPAD Revolution do PS3: a pasta dele, .sprx soltos do XPAD em /dev_hdd0/plugins e as linhas
+    dele nas listas de plugins do boot. Antes, guarda no PC uma cópia das configurações e das listas."""
+    os.makedirs(pasta_backup, exist_ok=True)
+    rel = {"arquivos": 0, "listas": []}
+    try:
+        itens = listar_remoto(ftp, XPAD_DIR)
+    except ftplib.all_errors:
+        itens = None
+    if itens is not None:
+        # cópia das configurações (controles registrados, analógico…) antes de apagar
+        for nome, d, _ in itens:
+            if not d and nome.lower().endswith((".txt", ".ini", ".cfg")):
+                with open(os.path.join(pasta_backup, legivel(nome)), "wb") as fl:
+                    ftp.retrbinary(f"RETR {juntar(XPAD_DIR, nome)}", fl.write)
+        rel["arquivos"] += sum(1 for _, d, _ in itens if not d)
+        apagar_remoto(ftp, XPAD_DIR, True)
+    # .sprx do XPAD soltos na pasta de plugins (versões antigas ou cópias manuais)
+    try:
+        for nome, d, _ in listar_remoto(ftp, "/dev_hdd0/plugins"):
+            n = nome.lower()
+            if not d and n.endswith(".sprx") and (n.startswith("xpad") or _eh_xpad("/" + n)):
+                ftp.delete(juntar("/dev_hdd0/plugins", nome))
+                rel["arquivos"] += 1
+    except ftplib.all_errors:
+        pass
+    # linhas do XPAD nas listas de plugins que carregam no boot (com cópia no PC antes de mexer)
+    for lista in LISTAS_BOOT:
+        if not existe_remoto(ftp, lista):
+            continue
+        texto, cod = ler_texto_remoto(ftp, lista)
+        linhas = texto.splitlines(keepends=True)
+        sobra = [ln for ln in linhas if not _eh_xpad(ln)]
+        if len(sobra) != len(linhas):
+            with open(os.path.join(pasta_backup, lista.strip("/").replace("/", "_")), "w", encoding="utf-8") as fl:
+                fl.write(texto)
+            gravar_texto_remoto(ftp, lista, "".join(sobra), cod)
+            rel["listas"].append((lista.rsplit("/", 1)[-1], len(linhas) - len(sobra)))
+    return rel
+
+
 # =============================================================== controles do PC -> xpad_devices.txt
 XPAD_DEVICES = XPAD_DIR + "/xpad_devices.txt"
 LIMITE_DEVICES = 24
@@ -2412,8 +2463,16 @@ class Console:
                                                                                           pady=(12, 0))
         ctk.CTkLabel(ct, text="XPAD Revolution: use controles de Xbox, GameSir,\n8BitDo, DualShock 4 e outros no PS3.",
                      font=f_txt, text_color=CINZA, justify="left").pack(anchor="w", padx=16)
-        self.cn_xpad_status = ctk.CTkLabel(ct, text="Verificando…", font=f_txt, text_color=CINZA, anchor="w")
-        self.cn_xpad_status.pack(anchor="w", padx=16, pady=(6, 0))
+        lin_st = ctk.CTkFrame(ct, fg_color="transparent")
+        lin_st.pack(fill="x", padx=16, pady=(6, 0))
+        self.cn_xpad_status = ctk.CTkLabel(lin_st, text="Verificando…", font=f_txt, text_color=CINZA, anchor="w")
+        self.cn_xpad_status.pack(side="left")
+        self.cn_btn_desinstalar = ctk.CTkButton(lin_st, text="Desinstalar", command=self.desinstalar_controle,
+                                                height=22, width=0, corner_radius=11, fg_color="transparent",
+                                                hover_color="#3A1620", text_color="#F87171",
+                                                text_color_disabled=CINZA_ESCURO,
+                                                font=ctk.CTkFont(family=F_SEMI, size=12))
+        self.cn_btn_desinstalar.pack(side="right")
         lin2 = ctk.CTkFrame(ct, fg_color="transparent")
         lin2.pack(fill="x", padx=16, pady=(6, 6))
         self.cn_btn_instalar = btn(lin2, "Instalar", lambda: self.instalar_controle(False), "azul", 150)
@@ -2482,6 +2541,7 @@ class Console:
                                        text="Atualizar e ativar" if xpad else "Instalar e ativar")
         self.cn_btn_zip.configure(state="normal" if on and tem_dados else "disabled")
         self.cn_btn_registrar.configure(state="normal" if on and xpad else "disabled")
+        self.cn_btn_desinstalar.configure(state="normal" if on and xpad else "disabled")
         tem_analog = tem_dados and self.cn_dados["analog"] is not None
         for w_ in (self.cn_sat, self.cn_dz, self.cn_btn_analog):
             w_.configure(state="normal" if on and tem_analog else "disabled")
@@ -2535,7 +2595,11 @@ class Console:
                 self.cn_dz.mostrar()
             n_on = sum(1 for i in self.cn_plugins if i["ativo"])
             aviso = "" if d["ativos"] is not None else "  (o PS3 não informa quais estão ativos)"
-            self.cn_msg(f"{len(self.cn_plugins)} plugin(s) • {n_on} ativo(s){aviso}")
+            pendente, self._cn_msg_pendente = getattr(self, "_cn_msg_pendente", None), None
+            if pendente:
+                self.cn_msg(*pendente)
+            else:
+                self.cn_msg(f"{len(self.cn_plugins)} plugin(s) • {n_on} ativo(s){aviso}")
             self._cn_botoes()
 
         def erro(e):
@@ -2666,6 +2730,70 @@ class Console:
             finally:
                 self.fila.put(("cb", self._op_fim))
         threading.Thread(target=trabalho, daemon=True).start()
+
+    def desinstalar_controle(self):
+        """Tira o XPAD da memória e apaga tudo dele do PS3 (sem perguntar; as configurações ficam salvas no PC)."""
+        if self.op_ativa or self.estado_ps3 != "ok":
+            return
+        self.op_ativa = True
+        self._cn_botoes()
+        self.cn_xpad_status.configure(text="Desinstalando…", text_color=CINZA)
+        ip = self.cfg.get("ip")
+        pasta = os.path.join(os.path.expanduser("~"), "PSTudo", "backup_xpad", time.strftime("%Y-%m-%d_%H-%M-%S"))
+
+        def trabalho():
+            try:
+                # 1) tira da memória o que estiver carregado (vale até reiniciar)
+                tirou = False
+                try:
+                    ativos = plugins_ativos(ip) or {}
+                    for caminho, slot in list(ativos.items()):
+                        if _eh_xpad(caminho):
+                            desativar_plugin(ip, caminho, slot)
+                            tirou = True
+                    for caminho, slot in list(getattr(self, "cn_sessao", {}).items()):
+                        if _eh_xpad(caminho) and caminho not in ativos:
+                            desativar_plugin(ip, caminho, slot)
+                            tirou = True
+                except Exception:
+                    pass
+                self.cn_sessao = {c: s for c, s in getattr(self, "cn_sessao", {}).items() if not _eh_xpad(c)}
+                if tirou:
+                    time.sleep(1.5)
+                # 2) apaga os arquivos e as linhas do boot
+                ftp = conectar(self.cfg)
+                try:
+                    rel = desinstalar_xpad(ftp, pasta)
+                finally:
+                    try:
+                        ftp.quit()
+                    except Exception:
+                        ftp.close()
+                self.fila.put(("cb", lambda: self._desinstalou(rel, pasta)))
+            except Exception as e:
+                self.fila.put(("cb", lambda e=e: self._xpad_erro(f"Não consegui desinstalar ({str(e)[:60]})")))
+            finally:
+                self.fila.put(("cb", self._op_fim))
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _desinstalou(self, rel, pasta):
+        try:
+            vazia = not os.listdir(pasta)
+            if vazia:
+                os.rmdir(pasta)
+        except OSError:
+            vazia = True
+        linhas = sum(n for _, n in rel["listas"])
+        txt = f"XPAD desinstalado: {rel['arquivos']} arquivo(s)"
+        if linhas:
+            txt += f" e {linhas} linha(s) do boot"
+        if not vazia:
+            txt += ". Configurações salvas em PSTudo\\backup_xpad"
+        msg = (txt + ".", "#34D399")
+        self.cn_msg(*msg)
+        self._cn_msg_pendente = msg          # continua aparecendo depois de recarregar a lista
+        self.cn_xpad_status.configure(text="Não instalado", text_color=CINZA)
+        self.carregar_console()
 
     def _op_fim(self):
         self.op_ativa = False
