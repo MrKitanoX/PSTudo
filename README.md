@@ -26,7 +26,7 @@
 | **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), enviar, baixar, renomear, criar pastas, apagar (com confirmação) e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution), ajustar o analógico e registrar os controles ligados no PC no `xpad_devices.txt`. |
-| **Tela** | Espelha a placa de captura com áudio. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** em 60, 120, 144 ou 210 Hz, sem travar quando você transmite no Discord ou no OBS. |
+| **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** em 60, 120, 144 ou 210 Hz, sem travar quando você transmite no Discord ou no OBS. |
 
 <p align="center">
   <img src="docs/imagens/enviando.png" width="400" alt="Enviando jogos">
@@ -50,11 +50,12 @@
 
 Se o PS3 não for encontrado, clique no ⚙ e digite o IP do console.
 
+A janela pode ser maximizada: a interface aumenta junto.
+
 ### Atalhos (dá para trocar no ⚙)
 
 | Tecla | O que faz |
 |---|---|
-| `F11` | App em tela cheia |
 | `F` | Liga e desliga o FSR (na tela cheia da aba Tela) |
 | `I` | Troca a interpolação de quadros (na tela cheia da aba Tela) |
 | `Ctrl` + `Shift` + `F` / `I` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |

@@ -746,8 +746,6 @@ class Extras:
     def trocar_aba(self, k):
         if self.op_ativa or k == self.aba:
             return
-        if self.aba == "tela":
-            self.tl_parar()
         self.aba = k
         self._pintar_abas()
         self._mostrar_aba(k)
@@ -3267,10 +3265,17 @@ class Tela:
         sl.set(self.tl_vol[0])
         sl.pack(side="left")
         self.tl_btn.configure(state="disabled")
-        self.tl_cap = None
-        self.tl_audio = None
         self.tl_foto = None
-        self.tl_cheia = None
+        self._tl_alvo = None
+        if getattr(self, "tl_cap", None):        # a placa continuou ligada enquanto você estava em outra aba
+            self.c.itemconfig(self.tl_aviso, text="Conectando à placa…" if self.tl_cap.quadro is None else "")
+            self.c.itemconfig(self.tl_aviso2, text="")
+            self.tl_btn.configure(text="■  Parar", fg_color="#3A1620", hover_color="#5A1E2C", text_color="#FCA5A5",
+                                  state="normal")
+        else:
+            self.tl_cap = None
+            self.tl_audio = None
+            self.tl_cheia = None
         self._tl_listar()
 
     def _tl_listar(self):
@@ -3298,6 +3303,8 @@ class Tela:
         if videos:
             self.tl_m_video.set(v_salvo if v_salvo in videos else escolher_padrao(videos))
             self.tl_btn.configure(state="normal")
+        elif getattr(self, "tl_cap", None):
+            self.tl_m_video.set(v_salvo or "Placa ligada")
         else:
             self.tl_m_video.set("Nenhuma placa encontrada")
             self.c.itemconfig(self.tl_aviso2, text="Nenhuma placa de captura encontrada. Conecte a placa no PC "
@@ -3326,6 +3333,7 @@ class Tela:
         self.salvar_cfg()
         self.tl_cap = Captura(fonte, MODOS_TELA.get(modo, (1920, 1080, 60)))
         self.tl_ultimo = -1
+        self.tl_geracao = getattr(self, "tl_geracao", 0) + 1
         self.c.itemconfig(self.tl_aviso, text="Conectando à placa…")
         self.c.itemconfig(self.tl_aviso2, text="")
         self.tl_btn.configure(text="■  Parar", fg_color="#3A1620", hover_color="#5A1E2C", text_color="#FCA5A5")
@@ -3338,7 +3346,8 @@ class Tela:
             except Exception as e:
                 self.tl_audio = None
                 self.tl_audio_msg = f"Sem áudio ({str(e)[:50]})"
-        self.root.after(15, self.tl_desenhar)
+        g = self.tl_geracao
+        self.root.after(15, lambda: self.tl_desenhar(g))
 
     def tl_parar(self, msg=None, msg2=""):
         if getattr(self, "tl_cap", None):
@@ -3370,10 +3379,11 @@ class Tela:
         rgb = cv2.cvtColor(cv2.resize(quadro, (nw, nh), interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
         return Image.frombuffer("RGB", (nw, nh), rgb.tobytes(), "raw", "RGB", 0, 1)
 
-    def tl_desenhar(self):
+    def tl_desenhar(self, geracao=None):
         cap = getattr(self, "tl_cap", None)
-        if not cap:
+        if not cap or (geracao is not None and geracao != getattr(self, "tl_geracao", 0)):
             return
+        prox = lambda ms: self.root.after(ms, lambda: self.tl_desenhar(geracao))   # noqa: E731
         if cap.erro:
             erro = cap.erro
             self.tl_parar("Não consegui mostrar a imagem",
@@ -3392,8 +3402,12 @@ class Tela:
                     txt += " • FSR"
                 if g.interp_hz and g.hz_monitor and g.interp_hz > g.hz_monitor + 1:
                     txt += f" • seu monitor é {g.hz_monitor} Hz"
-                self.c.itemconfig(self.tl_info, text=txt)
-            self.root.after(50, self.tl_desenhar)
+                if self.aba == "tela":
+                    self.c.itemconfig(self.tl_info, text=txt)
+            prox(50)
+            return
+        if self.aba != "tela" and not self.tl_cheia:
+            prox(100)        # em outra aba: a placa e o som continuam, só não desenha a prévia
             return
         if cap.n != self.tl_ultimo and cap.quadro is not None:
             self.tl_ultimo = cap.n
@@ -3419,7 +3433,7 @@ class Tela:
                 if self.tl_audio_msg:
                     txt += f"   {self.tl_audio_msg}"
                 self.c.itemconfig(self.tl_info, text=txt)
-        self.root.after(4, self.tl_desenhar)
+        prox(4)
 
     def _tl_mudou_fsr(self):
         v = bool(self.tl_fsr.get())
@@ -4017,9 +4031,8 @@ class Conversor:
 
 
 # =============================================================== atalhos
-ATALHOS_PADRAO = {"fsr": "f", "interp": "i", "app_cheia": "f11"}
-ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)",
-                 "app_cheia": "App em tela cheia"}
+ATALHOS_PADRAO = {"fsr": "f", "interp": "i"}
+ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)"}
 _TK_PARA_PYGAME = {"return": "return", "space": "space", "tab": "tab", "backspace": "backspace",
                    "insert": "insert", "delete": "delete", "home": "home", "end": "end", "prior": "page up",
                    "next": "page down", "up": "up", "down": "down", "left": "left", "right": "right",
@@ -4050,7 +4063,6 @@ class App(Extras, Console, Controles, Tela, Conversor):
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
         self.root.title(APP_NOME)
-        self.root.resizable(False, False)
         try:
             escala = ctk.ScalingTracker.get_window_dpi_scaling(self.root)
         except Exception:
@@ -4083,6 +4095,12 @@ class App(Extras, Console, Controles, Tela, Conversor):
 
         self._montar_base()
         self.root.bind_all("<KeyPress>", self._tecla_app, add="+")
+        # o botão de maximizar fica ativo; a interface cresce junto com a janela
+        # tamanho fixo pedido pelo app (sem a escala automática do CTk): assim, ao sair do "maximizado",
+        # a janela volta ao tamanho normal em vez de ficar do tamanho da interface ampliada
+        tk.Wm.wm_geometry(self.root, f"{p.px(W)}x{p.px(H)}")
+        tk.Wm.wm_minsize(self.root, int(p.px(W) * 0.6), int(p.px(H) * 0.6))
+        self.root.bind("<Configure>", self._janela_mudou, add="+")
 
         self.tela_inicio()
         self.root.after(50, self.ler_fila)
@@ -4458,7 +4476,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
         j = ctk.CTkToplevel(self.root)
         self._janela_cfg = j
         j.title("Configurações")
-        j.geometry("420x720")
+        j.geometry("420x670")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -4541,11 +4559,6 @@ class App(Extras, Console, Controles, Tela, Conversor):
                               command=lambda n=nome: capturar(n))
             b.pack(side="right")
             botoes_tecla[nome] = b
-        ctk.CTkButton(j, text=("Sair da tela cheia" if getattr(self, "app_cheia", False) else "Colocar o app em tela cheia")
-                      + f" ({self.nome_tecla('app_cheia')})", height=36, corner_radius=18, fg_color="transparent",
-                      border_width=1, border_color="#3A4660", hover_color="#1A2744", font=fonte,
-                      command=lambda: (j.destroy(), self.alternar_tela_cheia_app())).pack(fill="x", padx=28,
-                                                                                          pady=(10, 16))
 
         def salvar():
             self.cfg.update(ip=e_ip.get().strip(), usuario=e_usr.get().strip() or "anonymous",
@@ -4594,31 +4607,29 @@ class App(Extras, Console, Controles, Tela, Conversor):
                 return gpu.alternar_fsr()
             if nome == self.atalho("interp"):
                 return gpu.proxima_interp()
-        if nome and nome == self.atalho("app_cheia"):
-            self.alternar_tela_cheia_app()
-        elif e.keysym == "Escape" and getattr(self, "app_cheia", False):
-            self.alternar_tela_cheia_app()
 
-    # ---------------- app inteiro em tela cheia
-    def alternar_tela_cheia_app(self):
-        if self.op_ativa:
+    # ---------------- janela maximizada / redimensionada: a interface acompanha o tamanho
+    def _janela_mudou(self, e):
+        if e.widget is not self.root:
             return
-        self.app_cheia = not getattr(self, "app_cheia", False)
-        larg, alt = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        if self.app_cheia:
-            self.root.resizable(True, True)
-            self.root.attributes("-fullscreen", True)
-            tk.Wm.wm_geometry(self.root, f"{larg}x{alt}+0+0")   # sem a escala automática do CTk
-            escala = min(larg / W, alt / H)
-        else:
-            self.root.attributes("-fullscreen", False)
-            escala = self.escala_base
-        self.root.update_idletasks()
-        self.root.after(80, lambda: self._reconstruir(escala))
+        if getattr(self, "_espera_tam", None):
+            self.root.after_cancel(self._espera_tam)
+        self._espera_tam = self.root.after(220, self._ajustar_escala)
+
+    def _ajustar_escala(self):
+        self._espera_tam = None
+        larg, alt = self.root.winfo_width(), self.root.winfo_height()
+        if larg < 50 or alt < 50:
+            return
+        escala = min(larg / W, alt / H)
+        if abs(escala - self.p.s) < 0.02:
+            return
+        if self.op_ativa:               # no meio de uma operação: refaz depois que terminar
+            self._espera_tam = self.root.after(500, self._ajustar_escala)
+            return
+        self._reconstruir(escala)
 
     def _reconstruir(self, escala):
-        if self.aba == "tela":
-            self.tl_parar()
         self.limpar()
         self.p = Pintor(escala)
         try:
@@ -4628,10 +4639,6 @@ class App(Extras, Console, Controles, Tela, Conversor):
         self.c.delete("all")
         self.c.config(width=self.p.px(W), height=self.p.px(H))
         self.c.pack_configure(expand=True)
-        if not getattr(self, "app_cheia", False):
-            tk.Wm.wm_geometry(self.root, f"{self.p.px(W)}x{self.p.px(H)}")   # volta ao tamanho normal
-            self.root.update_idletasks()
-            self.root.resizable(False, False)
         self._montar_base()
         self._mostrar_aba(self.aba)
         if self.enviando and getattr(self, "ultimo_prog", None):
