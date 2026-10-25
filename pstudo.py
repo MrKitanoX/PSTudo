@@ -1789,6 +1789,28 @@ def http_webman(ip, caminho, timeout=6):
         return r.read(64 * 1024).decode("latin-1", "ignore")
 
 
+def atualizar_xmb(ip):
+    """Atualiza a lista de jogos do webMAN e recarrega o XMB (os jogos novos aparecem).
+    O XMB recarregando pode derrubar a conexão: isso conta como sucesso. Devolve False se o XMB não recarregou."""
+    def pedir(cmd, espera):
+        try:
+            http_webman(ip, cmd, timeout=espera)
+        except (ConnectionResetError, socket.timeout, TimeoutError):
+            pass
+        except urllib.error.URLError as e:
+            if isinstance(e, urllib.error.HTTPError) or not isinstance(e.reason, (socket.timeout, TimeoutError,
+                                                                                  ConnectionResetError)):
+                raise
+    pedir("refresh.ps3", 120)                      # refaz a lista de jogos (mygames.xml)
+    try:
+        pedir("reloadxmb.ps3", 20)                 # recarrega o XMB para mostrar a lista nova
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 404, 501):
+            return False                           # webMAN sem esse comando: a lista foi atualizada mesmo assim
+        raise
+    return True
+
+
 def comando_energia(ip, acao):
     """restart.ps3 / shutdown.ps3 — o console pode cortar a conexão antes de responder."""
     try:
@@ -5070,7 +5092,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
         self.c.coords(self.bar_fill, p.px(W / 2 - self.bar_w / 2) - g, p.px(self.bar_y))
 
     def tela_final(self, sucesso, titulo, sub, extra=None, acao_ok=None, texto_ok="Enviar mais jogos",
-                   acao_tentar=None, acao_voltar=None):
+                   acao_tentar=None, acao_voltar=None, botao_xmb=False):
         self.limpar()
         p, c = self.p, self.c
         c.create_image(p.px(W / 2), p.px(250), tags="view",
@@ -5078,14 +5100,46 @@ class App(Extras, Console, Controles, Tela, Conversor):
         c.create_text(p.px(W / 2), p.px(336), text=titulo, fill=BRANCO, font=(F_LIGHT, -p.px(30)), tags="view")
         c.create_text(p.px(W / 2), p.px(378), text=sub, fill=CINZA, font=(F_REG, -p.px(15)), tags="view", width=p.px(620),
                       justify="center")
-        if extra:
-            c.create_text(p.px(W / 2), p.px(412), text=extra, fill=CINZA_ESCURO, font=(F_REG, -p.px(12)), tags="view",
-                          width=p.px(620), justify="center")
-        if sucesso:
+        self.tx_final_extra = c.create_text(p.px(W / 2), p.px(412), text=extra or "", fill=CINZA_ESCURO,
+                                            font=(F_REG, -p.px(12)), tags="view", width=p.px(620), justify="center")
+        if sucesso and botao_xmb:
+            b = Botao(self, W / 2 - 125, 500, 230, 52, "Atualizar jogos no XMB", lambda: self.atualizar_jogos_xmb(b))
+            Botao(self, W / 2 + 125, 500, 230, 52, texto_ok, acao_ok or self.recomecar, "secundario")
+        elif sucesso:
             Botao(self, W / 2, 500, 220, 52, texto_ok, acao_ok or self.recomecar)
         else:
             Botao(self, W / 2 - 115, 500, 210, 52, "Tentar de novo", acao_tentar or self.iniciar_envio)
             Botao(self, W / 2 + 115, 500, 210, 52, "Voltar", acao_voltar or self.tela_inicio, "secundario")
+
+    def atualizar_jogos_xmb(self, botao):
+        if self.estado_ps3 != "ok" or not botao.ativo:
+            return
+        botao.set_ativo(False)
+        botao.set_texto("Atualizando…")
+        self.c.itemconfig(self.tx_final_extra, text="Atualizando a lista de jogos do webMAN e recarregando o XMB…",
+                          fill=CINZA)
+        ip = self.cfg.get("ip")
+
+        def tarefa():
+            try:
+                if atualizar_xmb(ip):
+                    msg, cor = "Pronto! O XMB recarregou com os jogos novos.", "#34D399"
+                else:
+                    msg, cor = ("Lista de jogos atualizada. Seu webMAN não recarrega o XMB sozinho: "
+                                "saia e entre no usuário do PS3 para ver os jogos."), "#34D399"
+            except Exception as e:
+                msg, cor = f"Não consegui atualizar ({str(e)[:70]}). Tente de novo com o PS3 no XMB.", "#F87171"
+
+            def mostrar():
+                try:
+                    if self.c.type(self.tx_final_extra):
+                        self.c.itemconfig(self.tx_final_extra, text=msg, fill=cor)
+                        botao.set_texto("Atualizar de novo" if cor == "#34D399" else "Tentar de novo")
+                        botao.set_ativo(True)
+                except tk.TclError:
+                    pass
+            self.fila.put(("cb", mostrar))
+        threading.Thread(target=tarefa, daemon=True).start()
 
     # ---------------- ações
     def _adicionar(self, item):
@@ -5206,7 +5260,8 @@ class App(Extras, Console, Controles, Tela, Conversor):
             minutos = max(1, round(tempo / 60))
             self.tela_final(True, "Tudo pronto!",
                             f"{n} {'jogo enviado' if n == 1 else 'jogos enviados'} para o PS3 em {minutos} min.",
-                            "Reinicie o webMAN (ou o XMB) se o jogo não aparecer na lista.")
+                            "Clique em Atualizar jogos no XMB para eles aparecerem na lista (o PS3 precisa estar no XMB, "
+                            "fora de jogo).", botao_xmb=True)
         elif tipo == "cancelado":
             self.enviando = False
             self.ultimo_prog = None
