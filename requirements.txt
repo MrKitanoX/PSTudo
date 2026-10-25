@@ -1,0 +1,11 @@
+customtkinter==6.0.0
+pillow==13.0.0
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+sounddevice==0.5.6
+pygrabber==0.2
+comtypes==1.4.17
+pygame-ce==2.5.8
+moderngl==5.13.0
+glcontext==3.1.0
+pycryptodome==4.2.0
