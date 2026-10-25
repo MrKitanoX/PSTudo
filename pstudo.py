@@ -1992,7 +1992,7 @@ def abrir_xpad_zip(dados):
 
 
 def instalar_xpad(ftp, arquivos):
-    """Copia os arquivos para o PS3. Não altera o boot_plugins.txt."""
+    """Copia os arquivos para o PS3. (O início automático é ligado à parte, pelo autoexec.bat.)"""
     import io
     for d in ("/dev_hdd0/plugins", XPAD_DIR):
         try:
@@ -2017,6 +2017,86 @@ LISTAS_BOOT = ("/dev_hdd0/boot_plugins.txt", "/dev_hdd0/boot_plugins_nocobra.txt
 def _eh_xpad(texto):
     t = texto.lower()
     return "ps3xpad" in t or "xpad_vsh" in t or "xpad_game" in t or "/xpad.sprx" in t
+
+
+AUTOEXEC = "/dev_hdd0/autoexec.bat"       # script que o webMAN MOD roda sozinho quando liga
+BLOCO_INI = "# >>> PSTudo: XPAD Revolution"
+BLOCO_FIM = "# <<< PSTudo: XPAD Revolution"
+ATRASO_XPAD = 15
+
+
+def bloco_inicio_xpad(segundos=ATRASO_XPAD):
+    """Trecho do autoexec.bat: espera o XMB, espera mais N segundos e carrega o XPAD."""
+    esperas = []
+    while segundos > 0:                   # o webMAN aceita esperas curtas: divide em pedaços de até 9 s
+        esperas.append(f"wait {min(9, segundos)}")
+        segundos -= min(9, segundos)
+    return "\n".join([BLOCO_INI + f" (carrega {ATRASO_XPAD} s depois do HEN; criado pelo PSTudo)",
+                      "wait xmb", *esperas,
+                      f"/loadprx.ps3?slot=0&prx={XPAD_VSH}",     # slot 0 = primeiro espaço livre
+                      BLOCO_FIM]) + "\n"
+
+
+def _tirar_bloco(texto):
+    if BLOCO_INI not in texto:
+        return texto
+    antes, _, resto = texto.partition(BLOCO_INI)
+    _, achou, depois = resto.partition(BLOCO_FIM)
+    if not achou:
+        return antes
+    return antes + depois.lstrip("\r\n")
+
+
+def ler_autoexec(ftp):
+    try:
+        return ler_texto_remoto(ftp, AUTOEXEC)
+    except ftplib.error_perm:
+        return "", "utf-8"
+
+
+def inicio_atrasado_ligado(ftp):
+    return BLOCO_INI in ler_autoexec(ftp)[0]
+
+
+def _tirar_xpad_das_listas(ftp, pasta_backup):
+    """Tira as linhas do XPAD das listas de plugins do boot (guardando no PC uma cópia antes de mexer)."""
+    mudou = []
+    for lista in LISTAS_BOOT:
+        if not existe_remoto(ftp, lista):
+            continue
+        texto, cod = ler_texto_remoto(ftp, lista)
+        linhas = texto.splitlines(keepends=True)
+        sobra = [ln for ln in linhas if not _eh_xpad(ln)]
+        if len(sobra) != len(linhas):
+            os.makedirs(pasta_backup, exist_ok=True)
+            with open(os.path.join(pasta_backup, lista.strip("/").replace("/", "_")), "w", encoding="utf-8") as fl:
+                fl.write(texto)
+            gravar_texto_remoto(ftp, lista, "".join(sobra), cod)
+            mudou.append((lista.rsplit("/", 1)[-1], len(linhas) - len(sobra)))
+    return mudou
+
+
+def ligar_inicio_atrasado(ftp, pasta_backup):
+    """Coloca o XPAD para ligar sozinho 15 s depois do HEN, pelo autoexec.bat do webMAN.
+    Tira o XPAD das listas do boot: carregado duas vezes, o webMAN acabaria desligando ele."""
+    texto, cod = ler_autoexec(ftp)
+    texto = _tirar_bloco(texto)
+    if texto and not texto.endswith("\n"):
+        texto += "\n"
+    gravar_texto_remoto(ftp, AUTOEXEC, texto + bloco_inicio_xpad(), cod)
+    return _tirar_xpad_das_listas(ftp, pasta_backup)
+
+
+def desligar_inicio_atrasado(ftp):
+    texto, cod = ler_autoexec(ftp)
+    if BLOCO_INI not in texto:
+        return False
+    sobra = _tirar_bloco(texto)
+    if sobra.strip():
+        gravar_texto_remoto(ftp, AUTOEXEC, sobra, cod)
+    else:
+        ftp.delete(AUTOEXEC)              # o arquivo só tinha o trecho do PSTudo
+    return True
 
 
 def desinstalar_xpad(ftp, pasta_backup):
@@ -2045,18 +2125,9 @@ def desinstalar_xpad(ftp, pasta_backup):
                 rel["arquivos"] += 1
     except ftplib.all_errors:
         pass
-    # linhas do XPAD nas listas de plugins que carregam no boot (com cópia no PC antes de mexer)
-    for lista in LISTAS_BOOT:
-        if not existe_remoto(ftp, lista):
-            continue
-        texto, cod = ler_texto_remoto(ftp, lista)
-        linhas = texto.splitlines(keepends=True)
-        sobra = [ln for ln in linhas if not _eh_xpad(ln)]
-        if len(sobra) != len(linhas):
-            with open(os.path.join(pasta_backup, lista.strip("/").replace("/", "_")), "w", encoding="utf-8") as fl:
-                fl.write(texto)
-            gravar_texto_remoto(ftp, lista, "".join(sobra), cod)
-            rel["listas"].append((lista.rsplit("/", 1)[-1], len(linhas) - len(sobra)))
+    # linhas do XPAD nas listas de plugins que carregam no boot e o início atrasado no autoexec.bat
+    rel["listas"] = _tirar_xpad_das_listas(ftp, pasta_backup)
+    rel["autoexec"] = desligar_inicio_atrasado(ftp)
     return rel
 
 
@@ -2234,6 +2305,50 @@ def mesclar_devices(texto, novos):
     return texto, adicionados, ja, sem_espaco
 
 
+def devices_detalhes(texto):
+    """Controles do xpad_devices.txt com nome e tipo (linhas não comentadas)."""
+    lista, vistos = [], set()
+    for linha in texto.splitlines():
+        util = linha.split("#", 1)[0].strip()
+        partes = [p_.strip() for p_ in util.split(",")]
+        if len(partes) >= 4:
+            try:
+                vid, pid = int(partes[0], 16), int(partes[1], 16)
+            except ValueError:
+                continue
+            if (vid, pid) not in vistos:
+                vistos.add((vid, pid))
+                lista.append({"vid": vid, "pid": pid, "nome": partes[2] or "Controle", "tipo": partes[3]})
+    return lista
+
+
+def ler_devices_remoto(ftp):
+    try:
+        texto, _ = ler_texto_remoto(ftp, XPAD_DEVICES)
+    except ftplib.error_perm:
+        return []
+    return devices_detalhes(texto)
+
+
+def remover_devices(ftp, chaves):
+    """Tira do xpad_devices.txt as linhas dos controles (vid, pid) indicados."""
+    texto, cod = ler_texto_remoto(ftp, XPAD_DEVICES)
+    novas, tirou = [], 0
+    for linha in texto.splitlines(keepends=True):
+        partes = [p_.strip() for p_ in linha.split("#", 1)[0].split(",")]
+        if len(partes) >= 4:
+            try:
+                if (int(partes[0], 16), int(partes[1], 16)) in chaves:
+                    tirou += 1
+                    continue
+            except ValueError:
+                pass
+        novas.append(linha)
+    if tirou:
+        gravar_texto_remoto(ftp, XPAD_DEVICES, "".join(novas), cod)
+    return tirou
+
+
 def registrar_devices(ftp, novos):
     try:
         texto, cod = ler_texto_remoto(ftp, XPAD_DEVICES)
@@ -2249,51 +2364,100 @@ class Controles:
     def abrir_registro_controles(self):
         if self.op_ativa or self.estado_ps3 != "ok":
             return
-        j = self._janela("Registrar controles", 600, 500)
+        j = self._janela("Registrar controles", 900, 540)
         self._rc_janela = j
         f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
+        f_sub = ctk.CTkFont(family=F_SEMI, size=14)
         f_txt = ctk.CTkFont(family=F_REG, size=12)
         f_nome = ctk.CTkFont(family=F_SEMI, size=13)
-        ctk.CTkLabel(j, text="Registrar controles do PC", font=f_tit, text_color=BRANCO).pack(
-            anchor="w", padx=24, pady=(20, 2))
-        ctk.CTkLabel(j, text="Ligue os controles neste PC (cabo ou receptor) e clique em Procurar. Os marcados "
-                             "serão adicionados ao xpad_devices.txt do PS3.",
-                     font=f_txt, text_color=CINZA, wraplength=550, justify="left").pack(anchor="w", padx=24)
-        lista = ctk.CTkScrollableFrame(j, fg_color="#0A1222", corner_radius=12, height=250,
-                                       scrollbar_button_color="#1E2A44")
-        lista.pack(fill="both", expand=True, padx=24, pady=(12, 6))
-        status = ctk.CTkLabel(j, text="", font=f_txt, text_color=CINZA, anchor="w", wraplength=550,
+        ctk.CTkLabel(j, text="Controles do XPAD", font=f_tit, text_color=BRANCO).pack(anchor="w", padx=24,
+                                                                                       pady=(20, 2))
+        ctk.CTkLabel(j, text="À esquerda, o que já está no xpad_devices.txt do PS3. À direita, os controles ligados "
+                             "neste PC (cabo ou receptor) que ainda não foram registrados.",
+                     font=f_txt, text_color=CINZA, wraplength=850, justify="left").pack(anchor="w", padx=24)
+        corpo = ctk.CTkFrame(j, fg_color="transparent")
+        corpo.pack(fill="both", expand=True, padx=24, pady=(12, 6))
+        corpo.grid_columnconfigure((0, 1), weight=1, uniform="col")
+        corpo.grid_rowconfigure(1, weight=1)
+
+        def cabecalho(col, texto):
+            fr = ctk.CTkFrame(corpo, fg_color="transparent")
+            fr.grid(row=0, column=col, sticky="ew", padx=(0, 8) if col == 0 else (8, 0), pady=(0, 6))
+            ctk.CTkLabel(fr, text=texto, font=f_sub, text_color=BRANCO).pack(side="left")
+            cont = ctk.CTkLabel(fr, text="", font=f_txt, text_color=CINZA_ESCURO)
+            cont.pack(side="right")
+            return cont
+
+        cont_reg = cabecalho(0, "Já registrados no PS3")
+        cont_disp = cabecalho(1, "Disponíveis neste PC")
+        lista_reg = ctk.CTkScrollableFrame(corpo, fg_color="#0A1222", corner_radius=12,
+                                           scrollbar_button_color="#1E2A44")
+        lista_reg.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        lista_disp = ctk.CTkScrollableFrame(corpo, fg_color="#0A1222", corner_radius=12,
+                                            scrollbar_button_color="#1E2A44")
+        lista_disp.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
+
+        status = ctk.CTkLabel(j, text="", font=f_txt, text_color=CINZA, anchor="w", wraplength=850,
                               justify="left")
         status.pack(fill="x", padx=26)
         self._rc_lbl = status
         rod = ctk.CTkFrame(j, fg_color="transparent")
         rod.pack(fill="x", padx=24, pady=(6, 18))
-        btn_reg = self._cn_btn(rod, "Registrar no PS3", lambda: registrar(), "azul", 150, 38)
+        btn_reg = self._cn_btn(rod, "Registrar no PS3  →", lambda: registrar(), "azul", 170, 38)
         btn_reg.pack(side="right")
-        btn_proc = self._cn_btn(rod, "Procurar", lambda: procurar(), "normal", 110, 38)
+        btn_proc = self._cn_btn(rod, "Procurar de novo", lambda: atualizar(), "normal", 140, 38)
         btn_proc.pack(side="right", padx=(0, 10))
+        estado = {"registrados": None, "pads": None}
         linhas = []
 
-        def mostrar(pads):
-            if not j.winfo_exists():
+        def vazio(lista, texto):
+            ctk.CTkLabel(lista, text=texto, font=f_txt, text_color=CINZA, justify="center").pack(pady=40)
+
+        def mostrar_registrados():
+            for w_ in lista_reg.winfo_children():
+                w_.destroy()
+            regs = estado["registrados"]
+            if regs is None:
+                vazio(lista_reg, "Lendo o PS3…")
                 return
-            for w_ in lista.winfo_children():
+            cont_reg.configure(text=f"{len(regs)} de {LIMITE_DEVICES}")
+            if not regs:
+                vazio(lista_reg, "Nenhum controle registrado ainda.")
+                return
+            for d in regs:
+                fr = ctk.CTkFrame(lista_reg, fg_color="#0F1A30", corner_radius=10)
+                fr.pack(fill="x", pady=3, padx=(0, 4))
+                self._cn_btn(fr, "Remover", lambda d=d: remover(d), "perigo", 84, 28).pack(side="right", padx=10)
+                esq = ctk.CTkFrame(fr, fg_color="transparent")
+                esq.pack(side="left", fill="x", expand=True, padx=12, pady=8)
+                ctk.CTkLabel(esq, text=d["nome"], font=f_nome, text_color=BRANCO, anchor="w").pack(anchor="w")
+                ctk.CTkLabel(esq, text=f"{d['vid']:04X}:{d['pid']:04X}  •  {TIPOS_PAD.get(d['tipo'], d['tipo'])}",
+                             font=f_txt, text_color=CINZA_ESCURO, anchor="w").pack(anchor="w")
+
+        def mostrar_disponiveis():
+            for w_ in lista_disp.winfo_children():
                 w_.destroy()
             linhas.clear()
-            btn_proc.configure(state="normal")
-            if not pads:
-                ctk.CTkLabel(lista, text="Nenhum controle encontrado.\nConecte o controle no PC e clique em Procurar.",
-                             font=f_txt, text_color=CINZA).pack(pady=40)
-                status.configure(text="")
+            pads = estado["pads"]
+            if pads is None:
+                vazio(lista_disp, "Procurando controles…")
                 btn_reg.configure(state="disabled")
                 return
-            for pad in pads:
-                fr = ctk.CTkFrame(lista, fg_color="#0F1A30", corner_radius=10)
+            ja = {(d["vid"], d["pid"]) for d in (estado["registrados"] or [])}
+            novos = [pd for pd in pads if (pd["vid"], pd["pid"]) not in ja]
+            cont_disp.configure(text=f"{len(novos)}" if novos else "")
+            if not novos:
+                vazio(lista_disp, "Nenhum controle novo.\nConecte o controle no PC e clique em Procurar de novo."
+                      if not pads else "Todos os controles ligados neste PC\njá estão registrados.")
+                btn_reg.configure(state="disabled")
+                return
+            for pad in novos:
+                fr = ctk.CTkFrame(lista_disp, fg_color="#0F1A30", corner_radius=10)
                 fr.pack(fill="x", pady=3, padx=(0, 4))
                 var = tk.BooleanVar(value=pad["tipo"] is not None and pad["aviso"] is None)
                 tipo = None
                 if pad["tipo"]:
-                    tipo = ctk.CTkOptionMenu(fr, values=list(TIPOS_PAD.values()), width=190, height=30,
+                    tipo = ctk.CTkOptionMenu(fr, values=list(TIPOS_PAD.values()), width=150, height=28,
                                              corner_radius=8, fg_color="#16233F", button_color="#1A2744",
                                              button_hover_color="#24365C", font=f_txt, dynamic_resizing=False)
                     tipo.set(TIPOS_PAD[pad["tipo"]])
@@ -2308,26 +2472,46 @@ class Controles:
                 if pad["aviso"]:
                     info += "  •  " + pad["aviso"]
                 ctk.CTkLabel(esq, text=info, font=f_txt, text_color="#FBBF24" if pad["aviso"] else CINZA_ESCURO,
-                             anchor="w", wraplength=290, justify="left").pack(anchor="w", padx=(28, 0))
+                             anchor="w", wraplength=200, justify="left").pack(anchor="w", padx=(28, 0))
                 if not pad["tipo"]:
                     cb.configure(state="disabled")
                 linhas.append((pad, var, tipo))
-            n = len(pads)
-            status.configure(text=f"{n} controle(s) encontrado(s).", text_color=CINZA)
             btn_reg.configure(state="normal")
 
-        def procurar():
+        def ler_registrados():
+            def ok(res):
+                if j.winfo_exists():
+                    estado["registrados"] = res
+                    mostrar_registrados()
+                    mostrar_disponiveis()
+
+            def erro(e):
+                if j.winfo_exists():
+                    estado["registrados"] = []
+                    mostrar_registrados()
+                    status.configure(text=f"Não consegui ler o xpad_devices.txt ({str(e)[:50]})", text_color="#F87171")
+            self.em_thread(ler_devices_remoto, ok, erro)
+
+        def atualizar():
             btn_proc.configure(state="disabled")
-            btn_reg.configure(state="disabled")
-            status.configure(text="Procurando controles…", text_color=CINZA)
+            estado["pads"] = None
+            mostrar_disponiveis()
+            status.configure(text="", text_color=CINZA)
 
             def tarefa():
                 try:
                     pads = detectar_controles()
                 except Exception:
                     pads = []
-                self.fila.put(("cb", lambda: mostrar(pads)))
+
+                def pronto():
+                    if j.winfo_exists():
+                        estado["pads"] = pads
+                        btn_proc.configure(state="normal")
+                        mostrar_disponiveis()
+                self.fila.put(("cb", pronto))
             threading.Thread(target=tarefa, daemon=True).start()
+            ler_registrados()
 
         def registrar():
             escolhidos = []
@@ -2336,7 +2520,7 @@ class Controles:
                 if var.get() and tipo is not None:
                     escolhidos.append(dict(pad, tipo=inverso[tipo.get()]))
             if not escolhidos:
-                status.configure(text="Marque pelo menos um controle.", text_color="#FBBF24")
+                status.configure(text="Marque pelo menos um controle à direita.", text_color="#FBBF24")
                 return
             btn_reg.configure(state="disabled")
             status.configure(text="Gravando no PS3…", text_color=CINZA)
@@ -2356,9 +2540,9 @@ class Controles:
                 if adicionados:
                     txt += " Reative o XPAD (ou reinicie o PS3) para o controle ser reconhecido."
                 status.configure(text=txt, text_color="#34D399" if adicionados else "#FBBF24")
-                btn_reg.configure(state="normal")
                 if adicionados:
                     self._rc_oferecer_recarga(rod)
+                ler_registrados()           # o registrado passa para a esquerda
 
             def erro(e):
                 if j.winfo_exists():
@@ -2366,7 +2550,23 @@ class Controles:
                     btn_reg.configure(state="normal")
             self.em_thread(lambda ftp: registrar_devices(ftp, escolhidos), ok, erro)
 
-        procurar()
+        def remover(d):
+            status.configure(text=f"Removendo {d['nome']}…", text_color=CINZA)
+
+            def ok(n):
+                if j.winfo_exists():
+                    status.configure(text=f"{d['nome']} removido. Reative o XPAD (ou reinicie o PS3) para valer.",
+                                     text_color="#34D399")
+                    self._rc_oferecer_recarga(rod)
+                    ler_registrados()
+
+            def erro(e):
+                if j.winfo_exists():
+                    status.configure(text=f"Não consegui remover ({str(e)[:60]})", text_color="#F87171")
+            self.em_thread(lambda ftp: remover_devices(ftp, {(d["vid"], d["pid"])}), ok, erro)
+
+        mostrar_registrados()
+        atualizar()
 
     def _rc_oferecer_recarga(self, rod):
         if getattr(self, "_rc_btn_recarga", None) and self._rc_btn_recarga.winfo_exists():
@@ -2449,9 +2649,8 @@ class Console:
         # ---- Energia
         en = cartao(0, 0, pady=(0, 10))
         ctk.CTkLabel(en, text="Energia", font=f_tit, text_color=BRANCO).pack(anchor="w", padx=16, pady=(12, 0))
-        ctk.CTkLabel(en, text="Controle o PS3 daqui mesmo.", font=f_txt, text_color=CINZA).pack(anchor="w", padx=16)
         lin = ctk.CTkFrame(en, fg_color="transparent")
-        lin.pack(fill="x", padx=16, pady=(10, 14))
+        lin.pack(fill="x", padx=16, pady=(8, 12))
         self.cn_btn_reiniciar = btn(lin, "↻  Reiniciar", lambda: self.energia("restart"), largura=140)
         self.cn_btn_reiniciar.pack(side="left")
         self.cn_btn_desligar = btn(lin, "⏻  Desligar", lambda: self.energia("shutdown"), "perigo", 140)
@@ -2461,7 +2660,7 @@ class Console:
         ct = cartao(1, 0)
         ctk.CTkLabel(ct, text="Suporte a controles", font=f_tit, text_color=BRANCO).pack(anchor="w", padx=16,
                                                                                           pady=(12, 0))
-        ctk.CTkLabel(ct, text="XPAD Revolution: use controles de Xbox, GameSir,\n8BitDo, DualShock 4 e outros no PS3.",
+        ctk.CTkLabel(ct, text="XPAD Revolution: Xbox, GameSir, 8BitDo, DS4 e outros.",
                      font=f_txt, text_color=CINZA, justify="left").pack(anchor="w", padx=16)
         lin_st = ctk.CTkFrame(ct, fg_color="transparent")
         lin_st.pack(fill="x", padx=16, pady=(6, 0))
@@ -2479,10 +2678,16 @@ class Console:
         self.cn_btn_instalar.pack(side="left")
         self.cn_btn_zip = btn(lin2, "Usar ZIP do PC", lambda: self.instalar_controle(True), largura=130)
         self.cn_btn_zip.pack(side="left", padx=10)
+        self.cn_auto = tk.BooleanVar(value=self.cfg.get("xpad_auto", True))
+        self.cn_sw_auto = ctk.CTkSwitch(ct, text=f"Ligar sozinho {ATRASO_XPAD} s depois do HEN", variable=self.cn_auto,
+                                        font=f_txt, text_color=BRANCO, progress_color="#0070D1",
+                                        button_color="#E5ECF8", fg_color="#2A3A5E", switch_width=36,
+                                        switch_height=18, command=self.alternar_inicio_xpad)
+        self.cn_sw_auto.pack(anchor="w", padx=16, pady=(0, 2))
 
         def slider(rotulo, de, ate, fmt):
             topo = ctk.CTkFrame(ct, fg_color="transparent")
-            topo.pack(fill="x", padx=16, pady=(6, 0))
+            topo.pack(fill="x", padx=16, pady=(4, 0))
             ctk.CTkLabel(topo, text=rotulo, font=f_txt, text_color=BRANCO).pack(side="left")
             val = ctk.CTkLabel(topo, text="", font=f_txt, text_color=CINZA)
             val.pack(side="right")
@@ -2497,7 +2702,7 @@ class Console:
                                                                   "  (sem correção)" if v == 100 else ""))
         self.cn_dz, self.cn_dz_val = slider("Zona morta", 0, 10, lambda v: f"{v}%")
         lin3 = ctk.CTkFrame(ct, fg_color="transparent")
-        lin3.pack(fill="x", padx=16, pady=(10, 12))
+        lin3.pack(fill="x", padx=16, pady=(8, 10))
         self.cn_btn_analog = btn(lin3, "Salvar analógico", self.salvar_analogico, largura=136)
         self.cn_btn_analog.pack(side="left")
         self.cn_btn_registrar = btn(lin3, "Registrar controles", self.abrir_registro_controles, largura=150)
@@ -2515,10 +2720,11 @@ class Console:
         self.cn_lista.pack(fill="both", expand=True, padx=6, pady=(8, 0))
         rod = ctk.CTkFrame(pl, fg_color="transparent")
         rod.pack(fill="x", padx=16, pady=(8, 12))
-        self.cn_status = ctk.CTkLabel(rod, text="", font=f_txt, text_color=CINZA, anchor="w")
-        self.cn_status.pack(side="left", fill="x", expand=True)
         self.cn_btn_atualizar = btn(rod, "⟳  Atualizar", self.carregar_console, largura=120)
-        self.cn_btn_atualizar.pack(side="right")
+        self.cn_btn_atualizar.pack(side="right")          # primeiro: o texto longo não empurra o botão
+        self.cn_status = ctk.CTkLabel(rod, text="", font=f_txt, text_color=CINZA, anchor="w", justify="left",
+                                      wraplength=320)
+        self.cn_status.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         self.cn_dados = None
         self.cn_plugins = []
@@ -2542,6 +2748,7 @@ class Console:
         self.cn_btn_zip.configure(state="normal" if on and tem_dados else "disabled")
         self.cn_btn_registrar.configure(state="normal" if on and xpad else "disabled")
         self.cn_btn_desinstalar.configure(state="normal" if on and xpad else "disabled")
+        self.cn_sw_auto.configure(state="normal" if on and xpad else "disabled")
         tem_analog = tem_dados and self.cn_dados["analog"] is not None
         for w_ in (self.cn_sat, self.cn_dz, self.cn_btn_analog):
             w_.configure(state="normal" if on and tem_analog else "disabled")
@@ -2567,7 +2774,8 @@ class Console:
 
         def trabalho(ftp):
             sprx = procurar_sprx(ftp)
-            dados = {"sprx": sprx, "xpad": existe_remoto(ftp, XPAD_VSH), "analog": ler_analog(ftp)}
+            dados = {"sprx": sprx, "xpad": existe_remoto(ftp, XPAD_VSH), "analog": ler_analog(ftp),
+                     "auto": inicio_atrasado_ligado(ftp)}
             dados["ativos"] = plugins_ativos(ip)
             return dados
 
@@ -2582,6 +2790,8 @@ class Console:
             todos = list(dict.fromkeys(list(ativos) + d["sprx"]))
             self.cn_plugins = [{"caminho": c_, "ativo": c_ in ativos, "slot": ativos.get(c_)} for c_ in todos]
             self._cn_desenhar_plugins()
+            if d["xpad"]:
+                self.cn_auto.set(bool(d.get("auto")))
             if d["xpad"]:
                 ligado = XPAD_VSH in ativos
                 self.cn_xpad_status.configure(text="✓ Instalado" + (" e ativo agora" if ligado else ""),
@@ -2705,8 +2915,14 @@ class Console:
                 self.fila.put(("cb", lambda: self.cn_xpad_status.configure(text="Enviando para o PS3…")
                                if self._cn_ativo() else None))
                 ftp = conectar(self.cfg)
+                auto = False
                 try:
                     mantidos = instalar_xpad(ftp, arquivos)
+                    if self.cfg.get("xpad_auto", True):    # liga sozinho 15 s depois do HEN, a cada boot
+                        pasta = os.path.join(os.path.expanduser("~"), "PSTudo", "backup_xpad",
+                                             time.strftime("%Y-%m-%d_%H-%M-%S"))
+                        ligar_inicio_atrasado(ftp, pasta)
+                        auto = True
                 finally:
                     try:
                         ftp.quit()
@@ -2721,7 +2937,7 @@ class Console:
                         ativo = False
                 else:
                     ativo = True
-                self.fila.put(("cb", lambda: self._xpad_ok(versao, mantidos, ativo)))
+                self.fila.put(("cb", lambda: self._xpad_ok(versao, mantidos, ativo, auto)))
             except Exception as e:
                 msg = str(e)
                 if "urlopen" in msg or "getaddrinfo" in msg or "HTTP Error" in msg:
@@ -2730,6 +2946,38 @@ class Console:
             finally:
                 self.fila.put(("cb", self._op_fim))
         threading.Thread(target=trabalho, daemon=True).start()
+
+    def alternar_inicio_xpad(self):
+        """Liga/desliga o início automático do XPAD (autoexec.bat do webMAN), na hora."""
+        ligar = bool(self.cn_auto.get())
+        self.cfg["xpad_auto"] = ligar
+        self.salvar_cfg()
+        if self.op_ativa or self.estado_ps3 != "ok":
+            return
+        pasta = os.path.join(os.path.expanduser("~"), "PSTudo", "backup_xpad", time.strftime("%Y-%m-%d_%H-%M-%S"))
+
+        def trabalho(ftp):
+            return ligar_inicio_atrasado(ftp, pasta) if ligar else desligar_inicio_atrasado(ftp)
+
+        def ok(res):
+            if ligar:
+                txt = f"Pronto: nos próximos boots o XPAD liga sozinho {ATRASO_XPAD} s depois do HEN."
+                if res:
+                    txt += " Ele saiu do boot_plugins.txt para não carregar duas vezes."
+            else:
+                txt = "Pronto: o XPAD não liga mais sozinho. Use Ativar quando quiser."
+            self.cn_msg(txt, "#34D399")
+
+        def erro(e):
+            self.cn_msg(f"Não consegui mudar o início automático ({str(e)[:50]})", "#F87171")
+            self.cn_auto.set(not ligar)
+        self._op_simples("Salvando…", trabalho, ok, erro)
+
+    def _op_simples(self, texto, trabalho, ok, erro):
+        self.op_ativa = True
+        self._cn_botoes()
+        self.cn_msg(texto)
+        self.em_thread(trabalho, ok, erro, self._op_fim)
 
     def desinstalar_controle(self):
         """Tira o XPAD da memória e apaga tudo dele do PS3 (sem perguntar; as configurações ficam salvas no PC)."""
@@ -2787,6 +3035,8 @@ class Console:
         txt = f"XPAD desinstalado: {rel['arquivos']} arquivo(s)"
         if linhas:
             txt += f" e {linhas} linha(s) do boot"
+        if rel.get("autoexec"):
+            txt += ", início automático desligado"
         if not vazia:
             txt += ". Configurações salvas em PSTudo\\backup_xpad"
         msg = (txt + ".", "#34D399")
@@ -2799,20 +3049,18 @@ class Console:
         self.op_ativa = False
         self._cn_botoes()
 
-    def _xpad_ok(self, versao, mantidos, ativo):
-        extra = " Suas configurações antigas foram mantidas." if mantidos else ""
+    def _xpad_ok(self, versao, mantidos, ativo, auto=False):
+        nome = versao or "XPAD Revolution"
         if ativo:
-            txt = (f"{versao or 'XPAD Revolution'} foi instalado e ativado agora, só até reiniciar.{extra} "
-                   "Espere uns 10 segundos pela mensagem “XPAD Rev Loaded!” e conecte o controle. "
-                   "Dentro do jogo, segure SELECT + L3 + R3 se o controle precisar.")
+            txt = f"{nome} instalado e ativo. Conecte o controle quando aparecer “XPAD Rev Loaded!”."
         else:
-            txt = (f"{versao or 'XPAD Revolution'} foi instalado.{extra} Não consegui ativá-lo agora; "
-                   "use o botão Ativar na lista de plugins.")
+            txt = f"{nome} instalado. Não consegui ativar agora: use Ativar na lista de plugins."
+        if auto:
+            txt += f" Nos próximos boots ele liga sozinho {ATRASO_XPAD} s depois do HEN."
+        if mantidos:
+            txt += " Configurações antigas mantidas."
+        self._cn_msg_pendente = (txt, "#34D399" if ativo else "#FBBF24")
         self.carregar_console()
-        if self._cn_ativo():
-            self.cn_xpad_status.configure(text="✓ Instalado" + (" e ativo agora" if ativo else ""),
-                                          text_color="#34D399")
-            self.root.after(900, lambda: self.cn_msg(txt[:150], "#34D399" if ativo else "#FBBF24"))
 
     def _xpad_erro(self, msg):
         if self._cn_ativo():
