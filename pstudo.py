@@ -627,8 +627,14 @@ def listar_remoto(ftp, caminho):
             if len(partes) < 9 or partes[8] in (".", ".."):
                 continue
             itens.append((partes[8], linha.startswith("d"), int(partes[4]) if partes[4].isdigit() else 0))
-    itens.sort(key=lambda x: (not x[1], x[0].lower()))
+    itens.sort(key=lambda x: (not x[1], ordem_natural(x[0])))
     return itens
+
+
+def ordem_natural(nome):
+    """Jogo_2 antes de Jogo_10."""
+    import re
+    return [int(p_) if p_.isdigit() else p_.casefold() for p_ in re.split(r"(\d+)", nome)]
 
 
 def apagar_remoto(ftp, caminho, eh_pasta):
@@ -673,7 +679,22 @@ def gravar_texto_remoto(ftp, caminho, texto, cod):
     ftp.storbinary(f"STOR {caminho}", io.BytesIO(texto.encode(cod, "replace")))
 
 
-def mini_icone(tipo, cor=(225, 232, 245, 255)):
+def caixa_marcar(marcada, tam):
+    """Caixinha de marcar (para selecionar vários arquivos)."""
+    k = 4
+    img = Image.new("RGBA", (tam * k, tam * k), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    m, r = 2 * k, 5 * k
+    if marcada:
+        d.rounded_rectangle([m, m, tam * k - m, tam * k - m], r, fill=(0, 112, 209, 255))
+        d.line([(tam * k * 0.28, tam * k * 0.52), (tam * k * 0.44, tam * k * 0.68), (tam * k * 0.73, tam * k * 0.34)],
+               fill=(255, 255, 255, 255), width=int(2.2 * k), joint="curve")
+    else:
+        d.rounded_rectangle([m, m, tam * k - m, tam * k - m], r, outline=(90, 104, 132, 255), width=int(1.6 * k))
+    return img.resize((tam, tam), Image.LANCZOS)
+
+
+def mini_icone(tipo, cor=(225, 232, 245, 255), pil=False):
     T = 72
     img = Image.new("RGBA", (T, T), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -686,6 +707,8 @@ def mini_icone(tipo, cor=(225, 232, 245, 255)):
         if tipo == "texto":
             for y in (30, 41, 52):
                 d.line([26, y, 48, y], fill=cor, width=4)
+    if pil:
+        return img
     return ctk.CTkImage(light_image=img, dark_image=img, size=(18, 18))
 
 
@@ -872,20 +895,22 @@ class Extras:
         fonte = ctk.CTkFont(family=F_REG, size=13)
         fonte_b = ctk.CTkFont(family=F_SEMI, size=13)
         painel = ctk.CTkFrame(self.root, fg_color=PAINEL, corner_radius=0, width=w - 28, height=h - 28)
-        painel.pack_propagate(False)
         painel.grid_propagate(False)
+        painel.pack_propagate(False)
         c.create_window(p.px(x0 + 14), p.px(y0 + 14), window=painel, anchor="nw", tags="view")
         self.widgets.append(painel)
+        # grade: a lista fica com o espaço que sobrar, então os botões de baixo nunca são empurrados para fora
+        painel.grid_columnconfigure(0, weight=1)
+        painel.grid_rowconfigure(2, weight=1)
 
         def botao(pai_, texto, cmd, largura=None, perigo=False):
-            b = ctk.CTkButton(pai_, text=texto, command=cmd, height=34, corner_radius=17, font=fonte_b,
-                              width=largura or 0, fg_color="#3A1620" if perigo else BTN,
-                              hover_color="#5A1E2C" if perigo else BTN_HOVER,
-                              text_color="#FCA5A5" if perigo else BRANCO, text_color_disabled=CINZA_ESCURO)
-            return b
+            return ctk.CTkButton(pai_, text=texto, command=cmd, height=34, corner_radius=17, font=fonte_b,
+                                 width=largura or 0, fg_color="#3A1620" if perigo else BTN,
+                                 hover_color="#5A1E2C" if perigo else BTN_HOVER,
+                                 text_color="#FCA5A5" if perigo else BRANCO, text_color_disabled="#6B7488")
 
         topo = ctk.CTkFrame(painel, fg_color="transparent")
-        topo.pack(fill="x", padx=8, pady=(6, 8))
+        topo.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 8))
         self.fm_btn_voltar = botao(topo, "←", self.fm_subir, 40)
         self.fm_btn_voltar.pack(side="left")
         self.fm_lbl_path = ctk.CTkLabel(topo, text=legivel(self.fm_path), font=ctk.CTkFont(family=F_SEMI, size=15),
@@ -898,7 +923,7 @@ class Extras:
 
         # ---- pesquisa: filtra enquanto digita; Enter procura também dentro das subpastas
         busca = ctk.CTkFrame(painel, fg_color="transparent")
-        busca.pack(fill="x", padx=8, pady=(0, 6))
+        busca.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 6))
         self.fm_busca = ctk.CTkEntry(busca, height=34, corner_radius=17, fg_color="#0A1222", border_color="#26324D",
                                      text_color=BRANCO, font=fonte, placeholder_text_color=CINZA_ESCURO,
                                      placeholder_text="Pesquisar nesta pasta…   (Enter procura também nas subpastas)")
@@ -911,16 +936,51 @@ class Extras:
         botao(busca, "✕", self.fm_limpar_busca, 40).pack(side="left", padx=(6, 0))
         self.fm_modo_fundo = False
 
-        self.fm_lista = ctk.CTkScrollableFrame(painel, fg_color=PAINEL, corner_radius=0, height=256,
-                                               scrollbar_button_color="#1E2A44",
-                                               scrollbar_button_hover_color="#2A3A5E")
-        self.fm_lista.pack(fill="both", expand=True, padx=2)
+        # ---- lista desenhada num canvas: rolagem presa ao conteúdo e seleção de vários itens
+        caixa = tk.Frame(painel, bg=PAINEL, bd=0, highlightthickness=0)
+        caixa.grid(row=2, column=0, sticky="nsew", padx=(2, 2))
+        caixa.grid_columnconfigure(0, weight=1)
+        caixa.grid_rowconfigure(0, weight=1)
+        self.fm_cv = tk.Canvas(caixa, bg=PAINEL, highlightthickness=0, bd=0, height=10, width=10,
+                               takefocus=1)
+        self.fm_cv.grid(row=0, column=0, sticky="nsew")
+        self.fm_barra = ctk.CTkScrollbar(caixa, command=self._fm_barra_cmd, fg_color=PAINEL,
+                                         button_color="#1E2A44", button_hover_color="#2A3A5E")
+        self.fm_barra.grid(row=0, column=1, sticky="ns")
+        self.fm_lista = self.fm_cv          # nome antigo usado em outros lugares
+        self.fm_off = 0
+        self.fm_hover = None
+        cv = self.fm_cv
+        cv.bind("<Configure>", lambda e: self._fm_redesenhar())
+        cv.bind("<Button-1>", self._fm_clique)
+        cv.bind("<Double-Button-1>", self._fm_duplo)
+        cv.bind("<Motion>", self._fm_mover)
+        cv.bind("<Leave>", lambda e: self._fm_set_hover(None))
+        cv.bind("<MouseWheel>", lambda e: self._fm_rolar(-e.delta / 120 * 3))
+        cv.bind("<Button-4>", lambda e: self._fm_rolar(-3))
+        cv.bind("<Button-5>", lambda e: self._fm_rolar(3))
+        cv.bind("<Control-a>", lambda e: (self.fm_marcar_tudo(True), "break")[1])
+        cv.bind("<Control-A>", lambda e: (self.fm_marcar_tudo(True), "break")[1])
+        cv.bind("<Delete>", lambda e: self.fm_apagar())
+        cv.bind("<Return>", lambda e: self._fm_abrir_marcado())
+        cv.bind("<Up>", lambda e: self._fm_teclas(-1, e))
+        cv.bind("<Down>", lambda e: self._fm_teclas(1, e))
+        cv.bind("<Prior>", lambda e: self._fm_rolar(-8))
+        cv.bind("<Next>", lambda e: self._fm_rolar(8))
 
-        self.fm_lbl_status = ctk.CTkLabel(painel, text="", font=fonte, text_color=CINZA, anchor="w", height=22)
-        self.fm_lbl_status.pack(fill="x", padx=10, pady=(6, 2))
+        rod = ctk.CTkFrame(painel, fg_color="transparent")
+        rod.grid(row=3, column=0, sticky="ew", padx=10, pady=(6, 2))
+        self.fm_lbl_status = ctk.CTkLabel(rod, text="", font=fonte, text_color=CINZA, anchor="w", height=22)
+        self.fm_lbl_status.pack(side="left", fill="x", expand=True)
+        self.fm_btn_tudo = ctk.CTkButton(rod, text="Marcar tudo", command=self.fm_marcar_tudo, height=22, width=0,
+                                         fg_color="transparent", hover_color=BTN, text_color="#7FB2F0",
+                                         font=ctk.CTkFont(family=F_SEMI, size=12), corner_radius=11)
+        self.fm_btn_tudo.pack(side="right")
+        self.fm_lbl_sel = ctk.CTkLabel(rod, text="", font=fonte, text_color=BRANCO, height=22)
+        self.fm_lbl_sel.pack(side="right", padx=(0, 8))
 
         acoes = ctk.CTkFrame(painel, fg_color="transparent")
-        acoes.pack(fill="x", padx=8, pady=(2, 4))
+        acoes.grid(row=4, column=0, sticky="ew", padx=8, pady=(2, 6))
         botao(acoes, "Enviar arquivos", self.fm_enviar_arquivos).pack(side="left")
         botao(acoes, "Enviar pasta", self.fm_enviar_pasta).pack(side="left", padx=6)
         botao(acoes, "Nova pasta", self.fm_nova_pasta).pack(side="left")
@@ -932,32 +992,67 @@ class Extras:
         self.fm_btn_baixar.pack(side="right")
         self.fm_btn_editar = botao(acoes, "Editar", self.fm_editar)
         self.fm_btn_editar.pack(side="right", padx=6)
-        self.fm_icones = {k: mini_icone(k) for k in ("pasta", "arquivo", "texto")}
+        self._fm_preparar_desenho()
         self.fm_listar()
 
     def _fm_ativo(self):
-        return self.aba == "arquivos" and getattr(self, "fm_lista", None) is not None and self.fm_lista.winfo_exists()
+        return self.aba == "arquivos" and getattr(self, "fm_cv", None) is not None and self.fm_cv.winfo_exists()
 
     def fm_status(self, texto, cor=CINZA):
         if self._fm_ativo():
             self.fm_lbl_status.configure(text=texto, text_color=cor)
 
+    # ---- seleção (vários itens)
+    @property
+    def fm_sel(self):
+        """O item marcado quando há exatamente um (para editar e renomear)."""
+        m = self.fm_marcados_itens()
+        return m[0] if len(m) == 1 else None
+
+    @fm_sel.setter
+    def fm_sel(self, valor):
+        self.fm_marcados = set() if valor is None else {valor[0]}
+
+    def fm_marcados_itens(self):
+        marc = getattr(self, "fm_marcados", set())
+        return [it for it in self.fm_itens if it[0] in marc]
+
     def _fm_botoes(self):
-        sel = self.fm_sel
-        tem = sel is not None
-        prot = tem and protegido(juntar(self.fm_path, sel[0]))
-        texto = tem and not sel[1] and sel[0].lower().endswith(EXT_TEXTO) and sel[2] <= LIMITE_EDICAO
-        ocupado = self.op_ativa
-        self.fm_btn_editar.configure(state="normal" if texto and not ocupado else "disabled")
-        self.fm_btn_baixar.configure(state="normal" if tem and not ocupado else "disabled")
-        self.fm_btn_renomear.configure(state="normal" if tem and not prot and not ocupado else "disabled")
-        self.fm_btn_apagar.configure(state="normal" if tem and not prot and not ocupado else "disabled")
+        if not self._fm_ativo():
+            return
+        itens = self.fm_marcados_itens()
+        n = len(itens)
+        um = itens[0] if n == 1 else None
+        algum_prot = any(protegido(juntar(self.fm_path, it[0])) for it in itens)
+        texto = um is not None and not um[1] and um[0].lower().endswith(EXT_TEXTO) and um[2] <= LIMITE_EDICAO
+        livre = not self.op_ativa
+        self.fm_btn_editar.configure(state="normal" if texto and livre else "disabled")
+        self.fm_btn_baixar.configure(state="normal" if n and livre else "disabled")
+        self.fm_btn_renomear.configure(state="normal" if um and not algum_prot and livre else "disabled")
+        self.fm_btn_apagar.configure(state="normal" if n and not algum_prot and livre else "disabled",
+                                     text=f"Apagar ({n})" if n > 1 else "Apagar")
+        self.fm_btn_baixar.configure(text=f"Baixar ({n})" if n > 1 else "Baixar")
         self.fm_btn_voltar.configure(state="normal" if self.fm_path != "/" else "disabled")
+        self.fm_lbl_sel.configure(text=f"{n} marcados" if n > 1 else "")
+        todos = bool(self.fm_itens) and n == len(self.fm_itens)
+        self.fm_btn_tudo.configure(text="Desmarcar" if todos else "Marcar tudo",
+                                   state="normal" if self.fm_itens else "disabled")
+
+    def fm_marcar_tudo(self, so_marcar=False):
+        if not self._fm_ativo() or not self.fm_itens:
+            return
+        if not so_marcar and len(self.fm_marcados_itens()) == len(self.fm_itens):
+            self.fm_marcados = set()
+        else:
+            self.fm_marcados = {it[0] for it in self.fm_itens}
+        self._fm_redesenhar()
+        self._fm_botoes()
 
     def fm_ir(self, caminho):
         if self.op_ativa:
             return
         self.fm_path = caminho
+        self.fm_off = 0
         self._fm_zerar_busca()
         self.fm_listar()
 
@@ -970,13 +1065,13 @@ class Extras:
         if self.fm_modo_fundo:          # recarregar no meio de uma pesquisa: refaz a pesquisa
             return self.fm_buscar_fundo()
         self.fm_busca_id += 1           # cancela uma pesquisa que ainda esteja rodando
-        self.fm_sel = None
         self.fm_lbl_path.configure(text=legivel(self.fm_path))
-        for w_ in self.fm_lista.winfo_children():
-            w_.destroy()
-        self._fm_botoes()
         if self.estado_ps3 != "ok":
             self.fm_desconectado = True
+            self.fm_itens, self.fm_todos = [], []
+            self.fm_sel = None
+            self._fm_redesenhar()
+            self._fm_botoes()
             self.fm_status("Conecte o PS3 para ver os arquivos.", "#FBBF24")
             return
         self.fm_desconectado = False
@@ -987,7 +1082,9 @@ class Extras:
             if not self._fm_ativo() or caminho != self.fm_path or self.fm_modo_fundo:
                 return
             self.fm_todos = itens
-            self._fm_filtrar()
+            mesma = getattr(self, "fm_path_listado", None) == caminho     # recarregou a mesma pasta
+            self.fm_path_listado = caminho
+            self._fm_filtrar(manter=mesma)
 
         def erro(e):
             self.fm_status(f"Não consegui abrir esta pasta ({str(e)[:60]})", "#F87171")
@@ -1004,11 +1101,12 @@ class Extras:
     def fm_limpar_busca(self):
         estava_fundo = self.fm_modo_fundo
         self._fm_zerar_busca()
+        self.fm_off = 0
         if estava_fundo:
             self.fm_listar()
         else:
             self._fm_filtrar()
-        self.fm_lista.focus_set()
+        self.fm_cv.focus_set()
 
     def _fm_digitou(self, e=None):
         if e is not None and e.keysym in ("Return", "KP_Enter", "Escape"):
@@ -1021,7 +1119,8 @@ class Extras:
             self.root.after_cancel(self._fm_espera)
         self._fm_espera = self.root.after(140, self._fm_filtrar)
 
-    def _fm_filtrar(self):
+    def _fm_filtrar(self, manter=False):
+        """Monta a lista visível. manter=True (recarregar a mesma pasta) guarda marcações e a posição."""
         self._fm_espera = None
         if not self._fm_ativo() or self.fm_modo_fundo:
             return
@@ -1029,11 +1128,14 @@ class Extras:
         termo = sem_acento(bruto)
         todos = self.fm_todos
         self.fm_itens = [it for it in todos if termo in sem_acento(legivel(it[0]))] if termo else list(todos)
-        self.fm_sel = None
+        if manter:
+            nomes = {it[0] for it in self.fm_itens}
+            self.fm_marcados = {n for n in getattr(self, "fm_marcados", set()) if n in nomes}
+        else:
+            self.fm_marcados = set()
+            self.fm_off = 0
+        self._fm_redesenhar()
         self._fm_botoes()
-        for w_ in self.fm_lista.winfo_children():
-            w_.destroy()
-        self._fm_desenhar()
         n, total = len(self.fm_itens), len(todos)
         if not termo:
             self.fm_status("Pasta vazia" if not n else f"{n} {'item' if n == 1 else 'itens'}")
@@ -1055,12 +1157,11 @@ class Extras:
         meu = self.fm_busca_id
         self.fm_modo_fundo = True
         self.fm_btn_fundo.configure(text="Procurando…")
-        self.fm_sel = None
+        self.fm_marcados = set()
         self.fm_itens = []
+        self.fm_off = 0
+        self._fm_redesenhar()
         self._fm_botoes()
-        for w_ in self.fm_lista.winfo_children():
-            w_.destroy()
-        self.fm_linhas = []
         self.fm_status("Procurando…")
         base = self.fm_path
         limite = 2000
@@ -1099,7 +1200,8 @@ class Extras:
             achados.sort(key=lambda x: (x[0].count("/"), not x[1], x[0].lower()))
             self.fm_itens = achados
             self.fm_btn_fundo.configure(text="Nas subpastas")
-            self._fm_desenhar()
+            self._fm_redesenhar()
+            self._fm_botoes()
             n = len(achados)
             if not n:
                 self.fm_status(f"Nada com “{bruto}” em {legivel(base)} e nas subpastas.", "#FBBF24")
@@ -1113,45 +1215,172 @@ class Extras:
                 self.fm_status(f"Não consegui pesquisar ({str(e)[:60]})", "#F87171")
         self.em_thread(trabalho, ok, erro)
 
-    def _fm_desenhar(self):
-        fonte = ctk.CTkFont(family=F_REG, size=14)
-        fonte_p = ctk.CTkFont(family=F_REG, size=12)
-        self.fm_linhas = []
-        for i, item in enumerate(self.fm_itens[:600]):
-            nome, eh_pasta, tam = item
-            tipo = "pasta" if eh_pasta else ("texto" if nome.lower().endswith(EXT_TEXTO) else "arquivo")
-            linha = ctk.CTkFrame(self.fm_lista, fg_color=PAINEL, corner_radius=10, height=38)
-            linha.pack(fill="x", pady=1, padx=(0, 6))
-            linha.pack_propagate(False)
-            ic = ctk.CTkLabel(linha, text="", image=self.fm_icones[tipo], width=24)
-            ic.pack(side="left", padx=(12, 8))
-            pasta_de, _, so_nome = nome.rpartition("/")
-            lb = ctk.CTkLabel(linha, text=legivel(so_nome), font=fonte, text_color=BRANCO, anchor="w")
-            extra = []
-            if pasta_de:                 # resultado de pesquisa nas subpastas: mostra onde está
-                lb.pack(side="left")
-                lp = ctk.CTkLabel(linha, text="   em " + legivel(pasta_de), font=fonte_p, text_color=CINZA_ESCURO,
-                                  anchor="w")
-                lp.pack(side="left", fill="x", expand=True)
-                extra.append(lp)
-            else:
-                lb.pack(side="left", fill="x", expand=True)
-            tm = ctk.CTkLabel(linha, text="" if eh_pasta else formatar_tamanho(tam), font=fonte_p,
-                              text_color=CINZA, width=90, anchor="e")
-            tm.pack(side="right", padx=14)
-            for w_ in [linha, ic, lb, tm] + extra:
-                w_.bind("<Button-1>", lambda e, k=i: self._fm_selecionar(k))
-                w_.bind("<Double-Button-1>", lambda e, k=i: self._fm_abrir(k))
-            self.fm_linhas.append(linha)
-        if len(self.fm_itens) > 600:
-            ctk.CTkLabel(self.fm_lista, text=f"+ {len(self.fm_itens) - 600} itens não mostrados",
-                         text_color=CINZA, font=fonte_p).pack(pady=6)
+    # ---- desenho da lista (só as linhas que aparecem)
+    def _fm_preparar_desenho(self):
+        import tkinter.font as tkfont
+        p = self.p
+        self.fm_alt = p.px(40)
+        self.fm_fonte = tkfont.Font(family=F_REG, size=-p.px(14))
+        self.fm_fonte_p = tkfont.Font(family=F_REG, size=-p.px(12))
+        t = p.px(18)
+        self.fm_fotos = {k: ImageTk.PhotoImage(mini_icone(k, pil=True).resize((t, t), Image.LANCZOS))
+                         for k in ("pasta", "arquivo", "texto")}
+        self.fm_caixas = {v: ImageTk.PhotoImage(caixa_marcar(v, p.px(18))) for v in (False, True)}
 
-    def _fm_selecionar(self, k):
-        for i, ln in enumerate(self.fm_linhas):
-            ln.configure(fg_color=LINHA_SEL if i == k else PAINEL)
-        self.fm_sel = self.fm_itens[k]
+    def _fm_corta(self, texto, fonte, largura):
+        if largura <= 0:
+            return ""
+        if fonte.measure(texto) <= largura:
+            return texto
+        a, b = 0, len(texto)
+        while a < b:
+            m = (a + b + 1) // 2
+            if fonte.measure(texto[:m] + "…") <= largura:
+                a = m
+            else:
+                b = m - 1
+        return texto[:a] + "…"
+
+    def _fm_total(self):
+        return len(self.fm_itens) * self.fm_alt
+
+    def _fm_prender(self):
+        """A rolagem nunca passa do começo nem do fim (nem rola quando tudo cabe)."""
+        vis = max(1, self.fm_cv.winfo_height())
+        self.fm_off = int(max(0, min(self.fm_off, self._fm_total() - vis)))
+
+    def _fm_redesenhar(self):
+        if not self._fm_ativo():
+            return
+        cv, p = self.fm_cv, self.p
+        cv.delete("all")
+        larg, vis = cv.winfo_width(), cv.winfo_height()
+        if larg < 20 or vis < 20:
+            return
+        self._fm_prender()
+        total, rh = self._fm_total(), self.fm_alt
+        if total:
+            self.fm_barra.set(self.fm_off / total, min(1.0, (self.fm_off + vis) / total))
+        else:
+            self.fm_barra.set(0.0, 1.0)
+        if not self.fm_itens:
+            msg = "" if self.fm_lbl_status.cget("text") in ("Carregando…", "Procurando…") else "Nada para mostrar"
+            cv.create_text(larg / 2, min(vis / 2, p.px(60)), text=msg, fill=CINZA_ESCURO, font=self.fm_fonte_p)
+            return
+        marc = getattr(self, "fm_marcados", set())
+        lw = max(40, (larg - p.px(8)) / p.s)
+        fundo_sel = p.ret(lw, (rh - p.px(3)) / p.s, 10, (18, 48, 92, 255))
+        fundo_hover = p.ret(lw, (rh - p.px(3)) / p.s, 10, (17, 28, 50, 255))
+        primeiro = self.fm_off // rh
+        ultimo = min(len(self.fm_itens), (self.fm_off + vis) // rh + 1)
+        x_tam = larg - p.px(16)
+        for i in range(primeiro, ultimo):
+            nome, eh_pasta, tam = self.fm_itens[i]
+            y = i * rh - self.fm_off
+            meio = y + rh / 2
+            if nome in marc:
+                cv.create_image(p.px(4), y + p.px(1), image=fundo_sel, anchor="nw")
+            elif self.fm_hover == i:
+                cv.create_image(p.px(4), y + p.px(1), image=fundo_hover, anchor="nw")
+            cv.create_image(p.px(22), meio, image=self.fm_caixas[nome in marc])
+            tipo = "pasta" if eh_pasta else ("texto" if nome.lower().endswith(EXT_TEXTO) else "arquivo")
+            cv.create_image(p.px(52), meio, image=self.fm_fotos[tipo])
+            tam_txt = "" if eh_pasta else formatar_tamanho(tam)
+            if tam_txt:
+                cv.create_text(x_tam, meio, text=tam_txt, anchor="e", fill=CINZA, font=self.fm_fonte_p)
+            limite = x_tam - p.px(100 if tam_txt else 10)
+            pasta_de, _, so_nome = nome.rpartition("/")
+            x = p.px(72)
+            t = self._fm_corta(legivel(so_nome), self.fm_fonte, limite - x)
+            cv.create_text(x, meio, text=t, anchor="w", fill=BRANCO, font=self.fm_fonte)
+            if pasta_de:                 # resultado da pesquisa nas subpastas: mostra onde está
+                x += self.fm_fonte.measure(t) + p.px(10)
+                onde = self._fm_corta("em " + legivel(pasta_de), self.fm_fonte_p, limite - x)
+                cv.create_text(x, meio, text=onde, anchor="w", fill=CINZA_ESCURO, font=self.fm_fonte_p)
+
+    def _fm_rolar(self, linhas):
+        self.fm_off += int(linhas * self.fm_alt / 1.5)
+        self._fm_redesenhar()
+
+    def _fm_barra_cmd(self, *args):
+        vis, total = max(1, self.fm_cv.winfo_height()), self._fm_total()
+        if args[0] == "moveto":
+            self.fm_off = int(float(args[1]) * total)
+        elif args[0] == "scroll":
+            passo = vis if args[2] == "pages" else self.fm_alt
+            self.fm_off += int(args[1]) * passo
+        self._fm_redesenhar()
+
+    def _fm_indice(self, y):
+        i = int((y + self.fm_off) // self.fm_alt)
+        return i if 0 <= i < len(self.fm_itens) else None
+
+    def _fm_set_hover(self, i):
+        if i != self.fm_hover:
+            self.fm_hover = i
+            self._fm_redesenhar()
+
+    def _fm_mover(self, e):
+        self._fm_set_hover(self._fm_indice(e.y))
+
+    def _fm_clique(self, e):
+        self.fm_cv.focus_set()
+        i = self._fm_indice(e.y)
+        if i is None:
+            self.fm_marcados = set()
+        else:
+            na_caixa = e.x < self.p.px(38)
+            ctrl, shift = bool(e.state & 0x4), bool(e.state & 0x1)
+            self._fm_selecionar(i, alternar=ctrl or na_caixa, faixa=shift)
+            return
+        self._fm_redesenhar()
         self._fm_botoes()
+
+    def _fm_selecionar(self, k, alternar=False, faixa=False):
+        """Clique: marca só este. Ctrl ou caixinha: marca/desmarca. Shift: marca do último até este."""
+        nome = self.fm_itens[k][0]
+        self.fm_cursor = k
+        marc = set(getattr(self, "fm_marcados", set()))
+        ancora = getattr(self, "fm_ancora", None)
+        if faixa and ancora is not None and ancora < len(self.fm_itens):
+            a, b = sorted((ancora, k))
+            if not alternar:
+                marc = set()
+            marc |= {self.fm_itens[j][0] for j in range(a, b + 1)}
+        elif alternar:
+            marc ^= {nome}
+            self.fm_ancora = k
+        else:
+            marc = {nome}
+            self.fm_ancora = k
+        self.fm_marcados = marc
+        self._fm_redesenhar()
+        self._fm_botoes()
+
+    def _fm_teclas(self, passo, e):
+        if not self.fm_itens:
+            return "break"
+        atual = getattr(self, "fm_cursor", None)
+        k = 0 if atual is None else max(0, min(len(self.fm_itens) - 1, atual + passo))
+        self._fm_selecionar(k, faixa=bool(e.state & 0x1))
+        y = k * self.fm_alt
+        vis = self.fm_cv.winfo_height()
+        if y < self.fm_off:
+            self.fm_off = y
+        elif y + self.fm_alt > self.fm_off + vis:
+            self.fm_off = y + self.fm_alt - vis
+        self._fm_redesenhar()
+        return "break"
+
+    def _fm_duplo(self, e):
+        i = self._fm_indice(e.y)
+        if i is not None:
+            self._fm_abrir(i)
+
+    def _fm_abrir_marcado(self):
+        um = self.fm_sel
+        if um is not None:
+            self._fm_abrir(self.fm_itens.index(um))
 
     def _fm_abrir(self, k):
         nome, eh_pasta, _ = self.fm_itens[k]
@@ -1251,7 +1480,7 @@ class Extras:
         self.dialogo("Nova pasta", f"Vai ser criada em {legivel(self.fm_path)}", "Criar", criar, campo="")
 
     def fm_renomear(self):
-        if not self.fm_sel:
+        if not self.fm_sel or self.op_ativa:
             return
         antigo = self.fm_sel[0]
         so_nome = antigo.rsplit("/", 1)[-1]
@@ -1261,34 +1490,62 @@ class Extras:
                 return
             a = juntar(self.fm_path, antigo)
             b = juntar(pai(a), para_ftp(novo))        # continua na mesma pasta (vale para resultados da pesquisa)
+            rel_pai = antigo.rpartition("/")[0]
+            self.fm_marcados = {f"{rel_pai}/{para_ftp(novo)}" if rel_pai else para_ftp(novo)}   # continua marcado
             self._fm_operacao("Renomeando…", lambda ftp: ftp.rename(a, b), f"Renomeado para “{novo}”.")
         self.dialogo("Renomear", f"Novo nome para “{legivel(so_nome)}”:", "Renomear", renomear,
                      campo=legivel(so_nome))
 
     def fm_apagar(self):
-        if not self.fm_sel:
+        itens = self.fm_marcados_itens()
+        if not itens or self.op_ativa:
             return
-        nome, eh_pasta, _ = self.fm_sel
-        caminho = juntar(self.fm_path, nome)
-        so_nome = legivel(nome.rsplit("/", 1)[-1])
-        aviso = ("A pasta e tudo que está dentro dela serão apagados do PS3. Isso não pode ser desfeito."
-                 if eh_pasta else "O arquivo será apagado do PS3. Isso não pode ser desfeito.")
-        self.dialogo(f"Apagar “{so_nome}”?", aviso, "Apagar", perigo=True,
-                     acao=lambda: self._fm_operacao("Apagando…", lambda ftp: apagar_remoto(ftp, caminho, eh_pasta),
-                                                    f"“{so_nome}” foi apagado."))
+        if any(protegido(juntar(self.fm_path, it[0])) for it in itens):
+            self.fm_status("Por segurança, o app não mexe em pastas do sistema.", "#F87171")
+            return
+        alvos = [(juntar(self.fm_path, n), d) for n, d, _ in itens]
+        nomes = [legivel(n.rsplit("/", 1)[-1]) for n, _, _ in itens]
+        if len(itens) == 1:
+            titulo = f"Apagar “{nomes[0]}”?"
+            aviso = ("A pasta e tudo que está dentro dela serão apagados do PS3. Isso não pode ser desfeito."
+                     if itens[0][1] else "O arquivo será apagado do PS3. Isso não pode ser desfeito.")
+            msg_ok = f"“{nomes[0]}” foi apagado."
+        else:
+            titulo = f"Apagar {len(itens)} itens?"
+            lista = ", ".join(nomes[:4]) + (f" e mais {len(nomes) - 4}" if len(nomes) > 4 else "")
+            pastas = sum(1 for it in itens if it[1])
+            aviso = (f"{lista}. " + ("As pastas serão apagadas com tudo que tem dentro. " if pastas else "")
+                     + "Isso não pode ser desfeito.")
+            msg_ok = f"{len(itens)} itens apagados."
+        prog = {"n": 0}
+
+        def trabalho(ftp):
+            for k, (caminho, eh_pasta) in enumerate(alvos, 1):
+                if len(alvos) > 1:
+                    self.fila.put(("cb", lambda k=k: self.fm_status(f"Apagando… {k} de {len(alvos)}")))
+                apagar_remoto(ftp, caminho, eh_pasta)
+                prog["n"] = k
+        self.dialogo(titulo, aviso, "Apagar", perigo=True,
+                     acao=lambda: self._fm_operacao("Apagando…", trabalho, msg_ok))
 
     def fm_baixar(self):
-        if not self.fm_sel or self.op_ativa:
+        itens = self.fm_marcados_itens()
+        if not itens or self.op_ativa:
             return
-        nome, eh_pasta, tam = self.fm_sel
         destino = filedialog.askdirectory(title="Salvar no PC em…", parent=self.root)
         if not destino:
             return
-        remoto = juntar(self.fm_path, nome)
-        local = os.path.join(destino, legivel(nome.rsplit("/", 1)[-1]))
-        prog = self._progresso_ui("Baixando…", None if eh_pasta else (tam or 1))
-        self._fm_operacao("Baixando…", lambda ftp: baixar_remoto(ftp, remoto, eh_pasta, local, prog),
-                          f"Salvo em {local}", recarregar=False)
+        lista = [(juntar(self.fm_path, n), d, os.path.join(destino, legivel(n.rsplit("/", 1)[-1])), t)
+                 for n, d, t in itens]
+        so_arquivos = all(not d for _, d, _, _ in lista)
+        total = sum(t for *_, t in lista) if so_arquivos else None
+        prog = self._progresso_ui("Baixando…", total or None)
+
+        def trabalho(ftp):
+            for remoto, eh_pasta, local, _ in lista:
+                baixar_remoto(ftp, remoto, eh_pasta, local, prog)
+        msg = f"Salvo em {lista[0][2]}" if len(lista) == 1 else f"{len(lista)} itens salvos em {destino}"
+        self._fm_operacao("Baixando…", trabalho, msg, recarregar=False)
 
     def fm_editar(self):
         if not self.fm_sel or self.op_ativa:
@@ -2567,7 +2824,9 @@ void main() {
 }
 """
 
-INTERP_OPCOES = {"Desligada": 0, "60 Hz": 60, "120 Hz": 120, "144 Hz": 144, "210 Hz": 210}
+# 0 = desligada; 2…6 = multiplica os quadros do jogo; INTERP_NATIVO = acompanha o Hz do monitor
+INTERP_NATIVO = -1
+INTERP_OPCOES = {"Desligada": 0, "x2": 2, "x3": 3, "x4": 4, "x5": 5, "x6": 6, "Nativo": INTERP_NATIVO}
 
 
 class Movimento:
@@ -2659,17 +2918,18 @@ class Movimento:
             elif self.rapido and self.tempo_medio < 0.25 * dur:
                 self.rapido = False
             with self.cond:
-                self.resultado = (qa, qb, fluxo, tb - ta)
+                self.resultado = (qa, qb, fluxo, tb - ta, tb)
 
 
 class TelaCheiaGPU:
     """Janela de tela cheia desenhada pela placa de vídeo, em uma thread própria.
     Esc ou clique duplo fecha; os atalhos do FSR e da interpolação vêm das configurações."""
 
-    def __init__(self, captura, fsr, ao_fechar, ao_mudar_fsr=None, interp_hz=0, ao_mudar_interp=None,
+    def __init__(self, captura, fsr, ao_fechar, ao_mudar_fsr=None, interp_modo=0, ao_mudar_interp=None,
                  atalhos=None, compativel=True):
         self.cap, self.fsr, self.ao_fechar, self.ao_mudar_fsr = captura, fsr, ao_fechar, ao_mudar_fsr
-        self.interp_hz, self.ao_mudar_interp = interp_hz, ao_mudar_interp
+        self.interp_modo, self.ao_mudar_interp = interp_modo, ao_mudar_interp
+        self.cadencia = 0.0
         self.atalhos = atalhos or {"fsr": "f", "interp": "i"}
         # janela 1 pixel maior que o monitor: o Windows não a trata como tela cheia exclusiva,
         # então Discord, OBS e companhia capturam sem travar
@@ -2698,9 +2958,9 @@ class TelaCheiaGPU:
         self.fsr = bool(ligado)
         self.avisar(f"FSR 1: {'ligado' if self.fsr else 'desligado'}")
 
-    def definir_interp(self, hz):
-        self.interp_hz = hz
-        self.avisar(f"Interpolação: {hz} Hz" if hz else "Interpolação: desligada")
+    def definir_interp(self, modo):
+        self.interp_modo = modo
+        self.avisar("Interpolação: " + texto_interp(modo, self.fonte_fps, self.hz_monitor))
 
     def alternar_fsr(self):
         self.definir_fsr(not self.fsr)
@@ -2709,7 +2969,7 @@ class TelaCheiaGPU:
 
     def proxima_interp(self):
         opcoes = list(INTERP_OPCOES.values())
-        novo = opcoes[(opcoes.index(self.interp_hz) + 1) % len(opcoes)] if self.interp_hz in opcoes else 0
+        novo = opcoes[(opcoes.index(self.interp_modo) + 1) % len(opcoes)] if self.interp_modo in opcoes else 0
         self.definir_interp(novo)
         if self.ao_mudar_interp:
             self.ao_mudar_interp(novo)
@@ -2877,8 +3137,16 @@ class TelaCheiaGPU:
             desenhar("aviso", caixa, 1.0, (0, oy, larg, alt), tex=0, opacidade=opac)
             ctx.disable(moderngl.BLEND)
 
-        def mostrar(src, inv, w, h):
-            """Desenha a textura src (w×h) na tela, com ou sem FSR, mais o aviso."""
+        def esperar_ate(alvo):
+            while True:
+                falta = alvo - time.perf_counter()
+                if falta <= 0:
+                    return
+                time.sleep(falta - 0.0015 if falta > 0.002 else 0)
+
+        def mostrar(src, inv, w, h, quando=None):
+            """Desenha a textura src (w×h) na tela, com ou sem FSR, mais o aviso.
+            quando: hora exata de mostrar (a imagem é preparada antes e trocada na hora certa)."""
             esc = min(larg / w, alt / h)
             vw, vh = max(2, int(w * esc)), max(2, int(h * esc))
             caixa = (-vw / larg, -vh / alt, 2 * vw / larg, 2 * vh / alt)
@@ -2897,16 +3165,24 @@ class TelaCheiaGPU:
                 src.use(0)
                 desenhar("simples", caixa, inv, (0, oy, larg, alt), tex=0)
             desenhar_aviso()
+            if quando:
+                esperar_ate(quando)
             pygame.display.flip()
+            contagem[0] += 1
 
         mov = None
         self.pronto.set()
-        ultimo, ult_clique, cont, t0 = -1, 0.0, 0, time.time()
+        contagem = [0]              # imagens mostradas (para o fps na tela)
+        ultimo, ult_clique, t0 = -1, 0.0, time.time()
         chave_ant = None            # último quadro DIFERENTE (quadro, pequeno, tempo)
         par = None                  # (w, h, duração) do par sendo interpolado
         inicio_par = 0.0
         prox = time.perf_counter()
         distintos, t_dist = 0, time.time()
+        vsync, vsync_ok = 0, True
+        intervalos, atrasos, atraso_est, cad = [], [], 0.0, 1 / 30
+        passo, id_par, ultimo_render = 1, 0, None
+
         while self.rodando and self.cap.rodando:
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT or (ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE):
@@ -2924,10 +3200,18 @@ class TelaCheiaGPU:
                     if agora - ult_clique < 0.35:
                         self.rodando = False
                     ult_clique = agora
-            hz = self.interp_hz   # cópia: pode ser trocado pela outra janela a qualquer momento
+            modo = self.interp_modo   # cópia: pode ser trocado pela outra janela a qualquer momento
             aviso_ativo = self.aviso_txt and time.perf_counter() - self.aviso_t < 1.3
+            vsync_quer = 1 if modo == INTERP_NATIVO else 0
+            if vsync_quer != vsync:
+                try:
+                    pygame.display.gl_set_swap_interval(vsync_quer)
+                    vsync = vsync_quer
+                    vsync_ok = True
+                except Exception:
+                    vsync, vsync_ok = vsync_quer, False
             # ---------------- sem interpolação: mostra cada quadro assim que chega
-            if not hz:
+            if not modo:
                 if mov:
                     mov.parar()
                     mov, chave_ant, par = None, None, None
@@ -2943,13 +3227,13 @@ class TelaCheiaGPU:
                 tex = textura("q", (w, h), bgr=True)
                 tex.write(np.ascontiguousarray(quadro))
                 mostrar(tex, 1.0, w, h)
-            # ---------------- com interpolação: ritmo próprio no Hz escolhido
+            # ---------------- com interpolação
             else:
                 if mov is None:
                     mov = Movimento()
                 if self.cap.n != ultimo and self.cap.quadro is not None:
                     ultimo = self.cap.n
-                    quadro, t_q = self.cap.quadro, time.perf_counter()
+                    quadro, t_q = self.cap.quadro, getattr(self.cap, "t", None) or time.perf_counter()
                     peq = mov.pequeno(quadro)
                     # o PS3 manda 60 Hz mesmo com o jogo a 30: quadros repetidos são ignorados
                     if chave_ant is None or float(np.mean(cv2_absdiff(peq, chave_ant[1]))) > 0.6:
@@ -2959,23 +3243,48 @@ class TelaCheiaGPU:
                         distintos += 1
                 res = mov.pegar()
                 if res is not None:
-                    qa, qb, fluxo, dur = res
+                    qa, qb, fluxo, dur, tb = res
+                    agora = time.perf_counter()
+                    # ritmo do jogo (mediana dos últimos intervalos) e quanto o cálculo do movimento atrasa
+                    if 1 / 240 < dur < 0.2:
+                        intervalos.append(dur)
+                        del intervalos[:-9]
+                    cad = sorted(intervalos)[len(intervalos) // 2] if intervalos else min(max(dur, 1 / 120), 0.1)
+                    atrasos.append(agora - tb)
+                    del atrasos[:-30]
+                    # margem = 90% dos atrasos recentes: o par quase nunca chega depois da hora marcada
+                    atraso_est = sorted(atrasos)[int(len(atrasos) * 0.9)] if len(atrasos) >= 5 else max(atrasos)
                     h, w = qb.shape[:2]
                     textura("a", (w, h), bgr=True).write(np.ascontiguousarray(qa))
                     textura("b", (w, h), bgr=True).write(np.ascontiguousarray(qb))
                     if fluxo is None:          # troca de cena ou movimento confuso: vai direto para o quadro novo
-                        par = (w, h, 1e-6, False)
+                        par = (w, h, False)
                     else:
                         fab, fba, parado = fluxo
                         textura("fab", (fab.shape[1], fab.shape[0]), comp=2, dtype="f4").write(fab)
                         textura("fba", (fba.shape[1], fba.shape[0]), comp=2, dtype="f4").write(fba)
                         textura("par", (parado.shape[1], parado.shape[0]), comp=1).write(parado)
-                        par = (w, h, min(max(dur, 1 / 120), 0.1), True)
-                    inicio_par = time.perf_counter()
+                        par = (w, h, True)
+                    # o par começa sempre com o mesmo atraso depois do quadro do jogo: ritmo uniforme
+                    inicio_par = tb + atraso_est + 0.001
+                    passo = 1                  # (multiplicador) próximo quadro inventado: 1/N, 2/N…
+                    id_par += 1
                     self.modo_rapido = mov.rapido
-                if par is not None:
-                    w, h, dur, tem_fluxo = par
-                    alfa = min(1.0, (time.perf_counter() - inicio_par) / dur)
+                    self.cadencia = cad
+                chave_render = (id_par, passo if modo != INTERP_NATIVO else time.perf_counter())
+                if chave_render == ultimo_render and not aviso_ativo:
+                    pass                       # nada mudou: não redesenha
+                elif par is not None:
+                    w, h, tem_fluxo = par
+                    if modo == INTERP_NATIVO:
+                        alfa = min(1.0, max(0.0, (time.perf_counter() - inicio_par) / cad))
+                        if alfa <= 0.0:
+                            alfa = 1.0 / max(2, round(cad * (self.hz_monitor or 60)))
+                    else:
+                        alfa = min(1.0, passo / modo)
+                    # multiplicador: quadro k do par aparece em inicio + (k-1)·cadência/N
+                    quando = inicio_par + (passo - 1) * cad / modo if modo != INTERP_NATIVO else None
+                    ultimo_render = chave_render
                     if tem_fluxo and alfa < 1.0:
                         saida = textura("interp", (w, h))
                         fbo_de("interp", saida).use()
@@ -2986,34 +3295,49 @@ class TelaCheiaGPU:
                         cache["par"].use(4)
                         desenhar("interp", (-1.0, -1.0, 2.0, 2.0), 1.0, (0, 0, w, h), ta=0, tb=1, fab=2, fba=3,
                                  tpar=4, alfa=alfa, res_fluxo=(float(Movimento.LARG), float(Movimento.ALT)))
-                        mostrar(saida, 0.0, w, h)
+                        mostrar(saida, 0.0, w, h, quando)
                     else:
-                        mostrar(cache["b"], 1.0, w, h)
+                        mostrar(cache["b"], 1.0, w, h, quando)
                 elif chave_ant is not None:
+                    ultimo_render = chave_render
                     qa = chave_ant[0]
                     h, w = qa.shape[:2]
                     tex = textura("q", (w, h), bgr=True)
                     tex.write(np.ascontiguousarray(qa))
                     mostrar(tex, 1.0, w, h)
-                # espera até o próximo quadro de saída
-                prox += 1.0 / hz
-                agora = time.perf_counter()
-                if prox < agora - 0.05:
-                    prox = agora
-                while True:
-                    falta = prox - time.perf_counter()
-                    if falta <= 0:
-                        break
-                    time.sleep(falta - 0.0015 if falta > 0.002 else 0)
-            cont += 1
+                # ---- espera até o próximo quadro
+                if modo == INTERP_NATIVO:
+                    if not vsync_ok:           # placa de vídeo sem sincronização vertical: relógio no Hz do monitor
+                        prox += 1.0 / (self.hz_monitor or 60)
+                        agora = time.perf_counter()
+                        if prox < agora - 0.05:
+                            prox = agora
+                        esperar_ate(prox)
+                    # com sincronização vertical, a troca de imagem já espera o monitor
+                else:
+                    if par is not None and passo < modo and ultimo_render == chave_render:
+                        passo += 1             # o próximo já é preparado e mostrado na hora dele
+                    else:                      # esperando o próximo par
+                        esperar_ate(time.perf_counter() + (1 / (self.hz_monitor or 60) if aviso_ativo else 0.002))
             agora = time.time()
             if agora - t0 >= 1:
-                self.fps, cont, t0 = cont / (agora - t0), 0, agora
+                self.fps, contagem[0], t0 = contagem[0] / (agora - t0), 0, agora
             if agora - t_dist >= 1:
                 self.fonte_fps, distintos, t_dist = distintos / (agora - t_dist), 0, agora
         if mov:
             mov.parar()
         ctx.release()
+
+
+def texto_interp(modo, fonte_fps=0.0, hz_monitor=0):
+    """Texto curto do modo de interpolação, com os quadros por segundo esperados."""
+    if not modo:
+        return "desligada"
+    if modo == INTERP_NATIVO:
+        return f"nativa ({hz_monitor} Hz)" if hz_monitor else "nativa (Hz do monitor)"
+    if fonte_fps >= 10:
+        return f"x{modo} ({round(fonte_fps) * modo} fps)"
+    return f"x{modo}"
 
 
 def tecla_para_vk(nome):
@@ -3189,6 +3513,7 @@ class Captura:
                 time.sleep(0.02)
                 continue
             falhas = 0
+            self.t = time.perf_counter()     # quando o quadro chegou (o ritmo da interpolação usa isto)
             self.quadro = q
             self.tamanho = (q.shape[1], q.shape[0])
             self.n += 1
@@ -3253,8 +3578,8 @@ class Tela:
         self.tl_btn_cheia.pack(side="left", padx=(0, 6))
         self.tl_fsr = tk.BooleanVar(value=bool(self.cfg.get("tela_fsr", False)))
         self.tl_interp = self.cfg.get("tela_interp", "Desligada")
-        if self.tl_interp not in INTERP_OPCOES:
-            self.tl_interp = "Desligada"
+        if self.tl_interp not in INTERP_OPCOES:      # versões antigas guardavam "120 Hz" etc.
+            self.tl_interp = "Nativo" if str(self.tl_interp).endswith("Hz") else "Desligada"
         ctk.CTkButton(barra, text="Imagem", width=70, height=34, corner_radius=17, fg_color=BTN,
                       hover_color=BTN_HOVER, font=ctk.CTkFont(family=F_SEMI, size=12),
                       command=self.tl_opcoes_imagem).pack(side="left", padx=(0, 6))
@@ -3394,14 +3719,15 @@ class Tela:
             if cap.n % 30 == 0:
                 g = self.tl_gpu
                 txt = f"Tela cheia na placa de vídeo • {g.fps:.0f} fps na tela"
-                if g.interp_hz:
-                    txt += f" (jogo a {g.fonte_fps:.0f})"
-                if g.interp_hz and g.modo_rapido:
+                m = g.interp_modo
+                if m:
+                    txt += f" (jogo a {g.fonte_fps:.0f}) • interpolação {texto_interp(m)}"
+                if m and g.modo_rapido:
                     txt += " • movimento: modo rápido"
                 if g.fsr:
                     txt += " • FSR"
-                if g.interp_hz and g.hz_monitor and g.interp_hz > g.hz_monitor + 1:
-                    txt += f" • seu monitor é {g.hz_monitor} Hz"
+                if m and m != INTERP_NATIVO and g.hz_monitor and g.fonte_fps * m > g.hz_monitor * 1.05:
+                    txt += f" • passa dos {g.hz_monitor} Hz do monitor: use um x menor ou Nativo"
                 if self.aba == "tela":
                     self.c.itemconfig(self.tl_info, text=txt)
             prox(50)
@@ -3469,9 +3795,10 @@ class Tela:
                                       command=self._tl_mudou_interp)
         menu.set(self.tl_interp)
         menu.pack(fill="x", padx=24)
-        ctk.CTkLabel(j, text="Cria quadros intermediários a partir do movimento da imagem. Deixa tudo mais fluido, "
-                             "mas acrescenta um pouco de atraso (cerca de 1 quadro do jogo) e pode gerar pequenas "
-                             "distorções em movimentos rápidos. Escolha um valor até o Hz do seu monitor. "
+        ctk.CTkLabel(j, text="Cria quadros intermediários a partir do movimento da imagem. x2 dobra os quadros do "
+                             "jogo (30 → 60), x4 quadruplica (30 → 120) e assim por diante, sempre no mesmo ritmo. "
+                             "Nativo acompanha o Hz do seu monitor, sincronizado com ele: é o mais suave. "
+                             "Acrescenta cerca de 1 quadro do jogo de atraso. "
                              f"Atalho na tela cheia: {self.nome_tecla('interp')}.",
                      font=f_txt, text_color=CINZA, wraplength=410, justify="left").pack(anchor="w", padx=24,
                                                                                       pady=(8, 0))
@@ -4086,7 +4413,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
         self.widgets = []
         self.raps = []
         self.fm_path = "/dev_hdd0"
-        self.fm_sel = None
+        self.fm_marcados = set()
         self.fm_itens = []
         self.fm_todos = []
         self.fm_busca_id = 0
