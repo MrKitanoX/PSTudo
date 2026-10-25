@@ -976,6 +976,7 @@ class Extras:
                                          button_color="#1E2A44", button_hover_color="#2A3A5E")
         self.fm_barra.grid(row=0, column=1, sticky="ns")
         self.fm_lista = self.fm_cv          # nome antigo usado em outros lugares
+        self._fm_barra_pos = None
         self.fm_off = 0
         self.fm_hover = None
         cv = self.fm_cv
@@ -1302,18 +1303,17 @@ class Extras:
             return
         self._fm_prender()
         total, rh = self._fm_total(), self.fm_alt
-        if total:
-            self.fm_barra.set(self.fm_off / total, min(1.0, (self.fm_off + vis) / total))
-        else:
-            self.fm_barra.set(0.0, 1.0)
         if not self.fm_itens:
             msg = "" if self.fm_lbl_status.cget("text") in ("Carregando…", "Procurando…") else "Nada para mostrar"
             cv.create_text(larg / 2, min(vis / 2, p.px(60)), text=msg, fill=CINZA_ESCURO, font=self.fm_fonte_p)
+            self._fm_atualizar_barra(0.0, 1.0)
             return
         marc = getattr(self, "fm_marcados", set())
         lw = max(40, (larg - p.px(8)) / p.s)
         fundo_sel = p.ret(lw, (rh - p.px(3)) / p.s, 10, (18, 48, 92, 255))
-        fundo_hover = p.ret(lw, (rh - p.px(3)) / p.s, 10, (17, 28, 50, 255))
+        # destaque do mouse: um item só, que é movido de linha em linha (sem redesenhar a lista)
+        cv.create_image(p.px(4), -1000, image=p.ret(lw, (rh - p.px(3)) / p.s, 10, (17, 28, 50, 255)),
+                        anchor="nw", tags="hover", state="hidden")
         primeiro = self.fm_off // rh
         ultimo = min(len(self.fm_itens), (self.fm_off + vis) // rh + 1)
         x_tam = larg - p.px(16)
@@ -1323,8 +1323,6 @@ class Extras:
             meio = y + rh / 2
             if nome in marc:
                 cv.create_image(p.px(4), y + p.px(1), image=fundo_sel, anchor="nw")
-            elif self.fm_hover == i:
-                cv.create_image(p.px(4), y + p.px(1), image=fundo_hover, anchor="nw")
             cv.create_image(p.px(22), meio, image=self.fm_caixas[nome in marc])
             tipo = "pasta" if eh_pasta else ("texto" if nome.lower().endswith(EXT_TEXTO) else "arquivo")
             cv.create_image(p.px(52), meio, image=self.fm_fotos[tipo])
@@ -1340,6 +1338,24 @@ class Extras:
                 x += self.fm_fonte.measure(t) + p.px(10)
                 onde = self._fm_corta("em " + legivel(pasta_de), self.fm_fonte_p, limite - x)
                 cv.create_text(x, meio, text=onde, anchor="w", fill=CINZA_ESCURO, font=self.fm_fonte_p)
+        self._fm_mostrar_hover()
+        # a barra vem por último e só quando muda (ela força a tela a se redesenhar)
+        self._fm_atualizar_barra(self.fm_off / total, min(1.0, (self.fm_off + vis) / total))
+
+    def _fm_atualizar_barra(self, a, b):
+        pos = (round(a, 4), round(b, 4))
+        if pos != getattr(self, "_fm_barra_pos", None):
+            self._fm_barra_pos = pos
+            self.fm_barra.set(*pos)
+
+    def _fm_mostrar_hover(self):
+        cv, i = self.fm_cv, self.fm_hover
+        if i is None or i >= len(self.fm_itens) or self.fm_itens[i][0] in getattr(self, "fm_marcados", set()):
+            cv.itemconfigure("hover", state="hidden")
+            return
+        cv.coords("hover", self.p.px(4), i * self.fm_alt - self.fm_off + self.p.px(1))
+        cv.itemconfigure("hover", state="normal")
+        cv.tag_lower("hover")
 
     def _fm_rolar(self, linhas):
         self.fm_off += int(linhas * self.fm_alt / 1.5)
@@ -1361,7 +1377,8 @@ class Extras:
     def _fm_set_hover(self, i):
         if i != self.fm_hover:
             self.fm_hover = i
-            self._fm_redesenhar()
+            if self._fm_ativo():
+                self._fm_mostrar_hover()
 
     def _fm_mover(self, e):
         self._fm_set_hover(self._fm_indice(e.y))
