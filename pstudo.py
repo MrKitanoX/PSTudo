@@ -141,27 +141,95 @@ def ip_local():
         s.close()
 
 
-def testar_ftp(ip, porta=21, timeout=0.6):
-    """Retorna o banner do FTP se houver um servidor respondendo."""
+def ips_locais():
+    """Todos os IPv4 de rede local deste PC (cabo, Wi-Fi…), começando pelo da rota padrão.
+    Adaptadores virtuais (VPN, VirtualBox, WSL…) entram depois, então o PS3 é achado mesmo com eles."""
+    ips = []
+    principal = ip_local()
+    if principal:
+        ips.append(principal)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.append(info[4][0])
+    except OSError:
+        pass
+    if WIN:
+        try:
+            import subprocess
+            saida = subprocess.run(["ipconfig"], capture_output=True, timeout=5,
+                                   creationflags=0x08000000).stdout.decode("latin-1", "ignore")
+            import re
+            ips += re.findall(r"IPv4[^:]*:\s*([\d.]+)", saida)
+        except Exception:
+            pass
+
+    def privado(ip):
+        a, b_ = (int(x) for x in ip.split(".")[:2])
+        return a == 10 or (a == 172 and 16 <= b_ <= 31) or (a == 192 and b_ == 168)
+    vistos = []
+    for ip in ips:
+        if ip.count(".") == 3 and privado(ip) and ip not in vistos:
+            vistos.append(ip)
+    return vistos
+
+
+# Começo do endereço físico (MAC) das placas de rede da Sony usadas no PS3
+MAC_SONY = ("00-04-1f", "00-13-15", "00-15-c1", "00-19-c5", "00-1d-0d", "00-1f-a7", "00-24-8d", "00-d9-d1",
+            "28-0d-fc", "70-9e-29", "a8-e3-ee", "f8-d0-ac", "fc-0f-e6", "00-1f-e4", "bc-60-a7", "2c-cc-44",
+            "f8-46-1c", "0c-fe-45", "70-66-55", "c8-63-f1", "00-e4-21", "78-c8-81", "5c-84-3c", "00-01-4a")
+
+
+def ips_sony_arp():
+    """IPs da tabela ARP do Windows cujo MAC é da Sony (o PS3 aparece aí depois de responder na rede)."""
+    if not WIN:
+        return []
+    try:
+        import re
+        import subprocess
+        saida = subprocess.run(["arp", "-a"], capture_output=True, timeout=5,
+                               creationflags=0x08000000).stdout.decode("latin-1", "ignore").lower()
+        return [ip for ip, mac in re.findall(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f-]{17})", saida)
+                if mac.startswith(MAC_SONY)]
+    except Exception:
+        return []
+
+
+def testar_ftp(ip, porta=21, timeout=1.0):
+    """Retorna o banner do FTP se houver um servidor respondendo.
+    Se a porta abriu, espera mais pelo banner: o webMAN às vezes demora para cumprimentar."""
     try:
         with socket.create_connection((ip, int(porta)), timeout=timeout) as s:
-            s.settimeout(timeout * 2)
+            s.settimeout(max(3.0, timeout * 2))
             banner = s.recv(256).decode("latin-1", "ignore")
             return banner if banner.startswith("220") else None
     except OSError:
         return None
 
 
+def testar_webman_http(ip, timeout=2.0):
+    """O servidor web do webMAN (porta 80) também denuncia o PS3."""
+    try:
+        with urllib.request.urlopen(f"http://{ip}/cpursx.ps3", timeout=timeout) as r:
+            return "webman" in r.read(4096).decode("latin-1", "ignore").lower()
+    except Exception:
+        return False
+
+
 def procurar_ps3(porta=21, ip_salvo=None):
     if ip_salvo and testar_ftp(ip_salvo, porta, 1.5):
         return ip_salvo
-    meu = ip_local()
-    if not meu:
+    meus = ips_locais()
+    # 1º os aparelhos da Sony que o PC já conhece; depois todas as redes do PC
+    candidatos = [ip for ip in ips_sony_arp() if ip not in meus]
+    for meu in meus:
+        base = meu.rsplit(".", 1)[0]
+        candidatos += [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" not in meus]
+    candidatos = list(dict.fromkeys(candidatos))
+    if not candidatos:
         return None
-    base = meu.rsplit(".", 1)[0]
-    candidatos = [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != meu]
     achados = []
-    with ThreadPoolExecutor(max_workers=96) as ex:
+    ex = ThreadPoolExecutor(max_workers=128)
+    try:
         futs = {ex.submit(testar_ftp, ip, porta): ip for ip in candidatos}
         for fut in as_completed(futs):
             banner = fut.result()
@@ -170,6 +238,13 @@ def procurar_ps3(porta=21, ip_salvo=None):
                 if any(k in banner.lower() for k in ("webman", "multiman", "ps3")):
                     return ip
                 achados.append(ip)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+    # servidores FTP sem "webMAN" no cumprimento: fica com o que for PS3 pelo site do webMAN ou pelo MAC
+    sony = set(ips_sony_arp())
+    for ip in achados:
+        if ip in sony or testar_webman_http(ip):
+            return ip
     return achados[0] if achados else None
 
 
@@ -4100,6 +4175,10 @@ class App(Extras, Console, Controles, Tela, Conversor):
             self.fila.put(("ps3", ip))
         threading.Thread(target=tarefa, daemon=True).start()
 
+    def _tentar_de_novo(self):
+        if self.estado_ps3 == "erro" and not self.enviando:
+            self.buscar_ps3()
+
     def checar_periodico(self):
         if self.enviando or self.estado_ps3 != "ok":
             return
@@ -4322,6 +4401,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
                 self.root.after(15000, self._loop_check)
             else:
                 self.atualizar_status("erro")
+                self.root.after(15000, self._tentar_de_novo)   # o PS3 pode ser ligado depois do app
         elif tipo == "check":
             if not dados:
                 self.atualizar_status("erro")
@@ -4378,7 +4458,7 @@ class App(Extras, Console, Controles, Tela, Conversor):
         j = ctk.CTkToplevel(self.root)
         self._janela_cfg = j
         j.title("Configurações")
-        j.geometry("420x680")
+        j.geometry("420x720")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -4387,8 +4467,10 @@ class App(Extras, Console, Controles, Tela, Conversor):
         fonte_t = ctk.CTkFont(family=F_LIGHT, size=24)
         fonte = ctk.CTkFont(family=F_REG, size=13)
         ctk.CTkLabel(j, text="Configurações", font=fonte_t, text_color=BRANCO).pack(anchor="w", padx=28, pady=(24, 2))
-        ctk.CTkLabel(j, text="Só mexa aqui se o PS3 não for encontrado sozinho.", font=fonte,
-                     text_color=CINZA).pack(anchor="w", padx=28, pady=(0, 14))
+        ctk.CTkLabel(j, text="Só mexa aqui se o PS3 não for encontrado sozinho. O IP aparece no PS3 em "
+                             "Configurações › Configurações de Rede › Lista de Configurações e Status da Conexão.",
+                     font=fonte, text_color=CINZA, wraplength=364, justify="left").pack(anchor="w", padx=28,
+                                                                                       pady=(0, 14))
 
         def campo(rotulo, valor, mostrar=None):
             ctk.CTkLabel(j, text=rotulo, font=fonte, text_color=CINZA).pack(anchor="w", padx=28)
