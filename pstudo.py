@@ -805,9 +805,9 @@ BTN_HOVER = "#20345C"
 
 class Extras:
     # ================================================= abas
-    ABAS = [("enviar", "Enviar jogos", 100), ("arquivos", "Arquivos", 78), ("rap", "Licenças", 78),
-            ("updates", "Updates", 78), ("console", "Console", 76), ("tela", "Tela", 58)]
-    ABAS_X = 430
+    ABAS = [("enviar", "Enviar jogos", 98), ("arquivos", "Arquivos", 76), ("rap", "Licenças", 76),
+            ("updates", "Updates", 76), ("console", "Console", 74), ("tela", "Tela", 56)]
+    ABAS_X = 402
 
     def _montar_abas(self):
         p, c = self.p, self.c
@@ -5688,6 +5688,295 @@ class Updates:
         self.em_thread(lambda ftp: versao_instalada(ftp, tid), ok, lambda e: None)
 
 
+# =============================================================== Controle remoto (controle do PC -> PS3 pelo webMAN)
+# O webMAN MOD cria um controle virtual no PS3 e aceita o estado dele por /pad.ps3?hold<botões>.
+# Limites do próprio webMAN: o analógico só vai "inclinado até o fim" (8 direções) e um analógico por vez.
+BOTOES_PS3 = ("cross", "circle", "square", "triangle", "L1", "R1", "L2", "R2", "L3", "R3", "select", "start", "psbtn")
+
+
+def _direcoes(x, y, limite=0.5):
+    d = []
+    if y < -limite:
+        d.append("up")
+    elif y > limite:
+        d.append("down")
+    if x < -limite:
+        d.append("left")
+    elif x > limite:
+        d.append("right")
+    return d
+
+
+def comando_pad(botoes, dpad, esq=(0.0, 0.0), dir_=(0.0, 0.0)):
+    """Estado do controle -> texto do /pad.ps3. Eixos de -1 a 1 (y positivo = para baixo).
+    O direcional tem prioridade sobre o analógico, e o esquerdo sobre o direito (o webMAN só aceita um)."""
+    partes = ["hold"] + [b for b in BOTOES_PS3 if b in botoes]
+    if dpad:
+        partes += [d for d in ("up", "down", "left", "right") if d in dpad]
+    else:
+        for nome, (x, y) in (("analogL", esq), ("analogR", dir_)):
+            d = _direcoes(x, y)
+            if d:
+                partes.append(nome + "_" + "".join(d))
+                break
+    return "_".join(partes)
+
+
+class EnviadorPad:
+    """Manda o estado mais recente do controle para o webMAN, sem acumular fila (só o último vale)."""
+
+    def __init__(self, ip, ao_erro=None):
+        self.ip, self.ao_erro = ip, ao_erro
+        self.cond = threading.Condition()
+        self.pendente = None
+        self.desejado = None
+        self.vivo = True
+        self.con = None
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def enviar(self, comando):
+        with self.cond:
+            if comando == self.desejado:
+                return
+            self.desejado = self.pendente = comando
+            self.cond.notify()
+
+    def parar(self, esperar=0.0):
+        """Solta tudo e desliga o controle virtual do PS3."""
+        with self.cond:
+            self.vivo = False
+            self.cond.notify()
+        if esperar:
+            self.thread.join(esperar)
+
+    def _pedir(self, caminho):
+        import http.client
+        for tentativa in range(2):
+            try:
+                if self.con is None:
+                    self.con = http.client.HTTPConnection(self.ip, 80, timeout=4)
+                self.con.request("GET", "/" + caminho, headers={"Connection": "keep-alive"})
+                r = self.con.getresponse()
+                r.read()
+                if r.getheader("connection", "").lower() == "close":
+                    self.con.close()
+                    self.con = None
+                return r.status
+            except (OSError, http.client.HTTPException):
+                try:
+                    if self.con:
+                        self.con.close()
+                except Exception:
+                    pass
+                self.con = None
+                if tentativa:
+                    raise
+
+    def _loop(self):
+        while True:
+            with self.cond:
+                while self.vivo and self.pendente is None:
+                    self.cond.wait()
+                if not self.vivo:
+                    break
+                cmd, self.pendente = self.pendente, None
+            try:
+                st = self._pedir("pad.ps3?" + cmd)
+                if st in (400, 404, 501):
+                    if self.ao_erro:
+                        self.ao_erro("O webMAN do seu PS3 não tem o controle virtual. Use a versão completa "
+                                     "do webMAN MOD (não a Lite).")
+                    break
+            except Exception:
+                with self.cond:                 # tenta de novo com o estado mais recente
+                    if self.pendente is None:
+                        self.pendente = self.desejado
+                time.sleep(0.5)
+        for c in ("pad.ps3?hold", "pad.ps3?off"):
+            try:
+                self._pedir(c)
+            except Exception:
+                pass
+        try:
+            if self.con:
+                self.con.close()
+        except Exception:
+            pass
+
+
+class ControlePC:
+    """Lê o controle ligado no PC. XInput primeiro (Xbox, GameSir, 8BitDo...); senão, joystick do Windows
+    (DualShock 4/DualSense e outros) com o layout de controle de PlayStation."""
+
+    def __init__(self):
+        import ctypes
+        from ctypes import wintypes
+        self.ctypes = ctypes
+
+        class GAMEPAD(ctypes.Structure):
+            _fields_ = [("wButtons", wintypes.WORD), ("bLeftTrigger", ctypes.c_ubyte),
+                        ("bRightTrigger", ctypes.c_ubyte), ("sThumbLX", ctypes.c_short),
+                        ("sThumbLY", ctypes.c_short), ("sThumbRX", ctypes.c_short), ("sThumbRY", ctypes.c_short)]
+
+        class STATE(ctypes.Structure):
+            _fields_ = [("dwPacketNumber", wintypes.DWORD), ("Gamepad", GAMEPAD)]
+
+        class JOYINFOEX(ctypes.Structure):
+            _fields_ = [(n, wintypes.DWORD) for n in ("dwSize", "dwFlags", "dwXpos", "dwYpos", "dwZpos", "dwRpos",
+                                                       "dwUpos", "dwVpos", "dwButtons", "dwButtonNumber", "dwPOV",
+                                                       "dwReserved1", "dwReserved2")]
+        self.STATE, self.JOYINFOEX = STATE, JOYINFOEX
+        self.xget = None
+        for dll in ("xinput1_4", "xinput1_3", "xinput9_1_0"):
+            try:
+                lib = ctypes.WinDLL(dll)
+            except OSError:
+                continue
+            try:
+                self.xget = lib[100]          # XInputGetStateEx: inclui o botão Guia (vira o PS)
+            except (AttributeError, OSError):
+                self.xget = lib.XInputGetState
+            break
+        try:
+            self.winmm = ctypes.WinDLL("winmm")
+        except OSError:
+            self.winmm = None
+        self.nome = ""
+
+    def ler(self):
+        """(nome, botões, direcional, esquerdo, direito) ou None se não houver controle."""
+        r = self._xinput()
+        return r if r else self._winmm()
+
+    def _xinput(self):
+        if not self.xget:
+            return None
+        ctypes = self.ctypes
+        for i in range(4):
+            st = self.STATE()
+            if self.xget(i, ctypes.byref(st)) != 0:
+                continue
+            g = st.Gamepad
+            b = g.wButtons
+            mapa = {0x1000: "cross", 0x2000: "circle", 0x4000: "square", 0x8000: "triangle", 0x100: "L1",
+                    0x200: "R1", 0x40: "L3", 0x80: "R3", 0x20: "select", 0x10: "start", 0x400: "psbtn"}
+            botoes = {n for m, n in mapa.items() if b & m}
+            if g.bLeftTrigger > 100:
+                botoes.add("L2")
+            if g.bRightTrigger > 100:
+                botoes.add("R2")
+            dpad = {n for m, n in ((1, "up"), (2, "down"), (4, "left"), (8, "right")) if b & m}
+            esq = (g.sThumbLX / 32768, -g.sThumbLY / 32768)
+            dir_ = (g.sThumbRX / 32768, -g.sThumbRY / 32768)
+            return (f"controle XInput {i + 1}", botoes, dpad, esq, dir_)
+        return None
+
+    def _winmm(self):
+        if not self.winmm:
+            return None
+        ctypes = self.ctypes
+        for i in range(16):
+            info = self.JOYINFOEX(dwSize=ctypes.sizeof(self.JOYINFOEX), dwFlags=0xFF)
+            if self.winmm.joyGetPosEx(i, ctypes.byref(info)) != 0:
+                continue
+            ordem = ("square", "cross", "circle", "triangle", "L1", "R1", "L2", "R2", "select", "start", "L3", "R3",
+                     "psbtn")
+            botoes = {n for k, n in enumerate(ordem) if info.dwButtons & (1 << k)}
+            dpad = set()
+            pov = info.dwPOV
+            if pov != 0xFFFF and pov <= 36000:
+                ang = pov / 100.0
+                if ang >= 292.5 or ang <= 67.5:
+                    dpad.add("up")
+                if 22.5 <= ang <= 157.5:
+                    dpad.add("right")
+                if 112.5 <= ang <= 247.5:
+                    dpad.add("down")
+                if 202.5 <= ang <= 337.5:
+                    dpad.add("left")
+
+            def eixo(v):
+                return (v - 32767.5) / 32767.5
+            esq = (eixo(info.dwXpos), eixo(info.dwYpos))
+            dir_ = (eixo(info.dwZpos), eixo(info.dwRpos))
+            return (f"controle {i + 1} do Windows", botoes, dpad, esq, dir_)
+        return None
+
+
+class ControleRemoto:
+    """Liga e desliga o uso do controle do PC no PS3 (botão 🎮 no topo do app)."""
+
+    def remoto_ativo(self):
+        return getattr(self, "_remoto", None) is not None
+
+    def alternar_remoto(self):
+        if self.remoto_ativo():
+            self.desligar_remoto()
+        else:
+            self.ligar_remoto()
+
+    def ligar_remoto(self, leitor=None):
+        if self.remoto_ativo():
+            return
+        if self.estado_ps3 != "ok":
+            self._aviso_app("Conecte o PS3 antes de ligar o controle remoto.", "#FBBF24")
+            return
+        try:
+            leitor = leitor or ControlePC()
+        except Exception as e:
+            self._aviso_app(f"Não consegui ler os controles do PC ({str(e)[:40]})", "#F87171")
+            return
+        estado = {"vivo": True, "nome": None, "avisou_sem": False}
+
+        def erro(t):
+            self.fila.put(("cb", lambda: (self._aviso_app(t, "#F87171"), self.desligar_remoto())))
+        env = EnviadorPad(self.cfg.get("ip"), erro)
+        self._remoto = (estado, env)
+
+        def loop():
+            while estado["vivo"]:
+                try:
+                    r = leitor.ler()
+                except Exception:
+                    r = None
+                if r is None:
+                    if estado["nome"] is not None or not estado["avisou_sem"]:
+                        estado["avisou_sem"] = True
+                        estado["nome"] = None
+                        env.enviar("hold")
+                        self.fila.put(("cb", lambda: self._aviso_app(
+                            "Controle remoto ligado, mas não achei controle no PC. Conecte um.", "#FBBF24")))
+                    time.sleep(0.5)
+                    continue
+                nome, botoes, dpad, esq, dir_ = r
+                if nome != estado["nome"]:
+                    estado["nome"] = nome
+                    self.fila.put(("cb", lambda n=nome: self._aviso_app(f"Controle remoto ligado ({n}) 🎮")))
+                env.enviar(comando_pad(botoes, dpad, esq, dir_))
+                time.sleep(0.008)
+        threading.Thread(target=loop, daemon=True).start()
+        self._pintar_remoto()
+
+    def desligar_remoto(self, esperar=0.0):
+        r = getattr(self, "_remoto", None)
+        if r is None:
+            return
+        estado, env = r
+        estado["vivo"] = False
+        env.parar(esperar)
+        self._remoto = None
+        self._pintar_remoto()
+        self._aviso_app("Controle remoto desligado.", CINZA)
+
+    def _pintar_remoto(self):
+        if getattr(self, "pad_btn", None) is None:
+            return
+        on = self.remoto_ativo()
+        self.c.itemconfig(self.pad_btn, image=self.pad_on if on else self.pad_n)
+        self.c.itemconfig(self.pad_tx, fill=BRANCO)
+
+
 def tecla_tk_para_nome(keysym):
     """Converte a tecla do Tk para o nome usado pelo pygame. None = tecla não permitida."""
     k = keysym.lower()
@@ -5707,7 +5996,7 @@ def nome_bonito(tecla):
 
 
 # =============================================================== app
-class App(Extras, Console, Controles, Tela, Conversor, Updates):
+class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
     def __init__(self):
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
@@ -5797,8 +6086,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
     # ---------------- status do PS3 (canto superior direito)
     def _montar_status(self):
         p, c = self.p, self.c
-        self.pill_w = 168
-        x = W - 48 - 44 - 12 - self.pill_w / 2
+        self.pill_w = 152
+        x = W - 48 - 44 - 10 - 44 - 10 - self.pill_w / 2
         self.pill_imgs = {k: p.ret(self.pill_w, 40, 20, (14, 24, 46, 220), outline=(255, 255, 255, 40), largura=1)
                           for k in ("ok", "busca", "erro")}
         self.pill = c.create_image(p.px(x), p.px(56), image=self.pill_imgs["busca"], tags=("pill",))
@@ -5818,6 +6107,23 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
         c.tag_bind("eng", "<Enter>", lambda e: (c.itemconfig(self.eng, image=self.eng_h), c.config(cursor="hand2")))
         c.tag_bind("eng", "<Leave>", lambda e: (c.itemconfig(self.eng, image=self.eng_n), c.config(cursor="")))
         c.tag_bind("eng", "<Button-1>", lambda e: self.abrir_config())
+        # botão do controle remoto (usar o controle do PC no PS3)
+        px_ = gx - 44 - 10
+        self.pad_n = self.eng_n
+        self.pad_h = self.eng_h
+        self.pad_on = p.ret(44, 44, 22, AZUL + (255,), outline=(255, 255, 255, 90), largura=1)
+        self.pad_btn = c.create_image(p.px(px_), p.px(56), image=self.pad_n, tags=("padb",))
+        self.pad_tx = c.create_text(p.px(px_), p.px(57), text="🎮", fill=BRANCO, font=(F_SYM, -p.px(18)),
+                                    tags=("padb",))
+
+        def pad_hover(dentro):
+            c.config(cursor="hand2" if dentro else "")
+            if not self.remoto_ativo():
+                c.itemconfig(self.pad_btn, image=self.pad_h if dentro else self.pad_n)
+        c.tag_bind("padb", "<Enter>", lambda e: pad_hover(True))
+        c.tag_bind("padb", "<Leave>", lambda e: pad_hover(False))
+        c.tag_bind("padb", "<Button-1>", lambda e: self.alternar_remoto())
+        self._pintar_remoto()
         self.atualizar_status("busca")
 
     def atualizar_status(self, estado):
@@ -6412,6 +6718,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates):
             self._atualizar_aba_envio(min(1.0, self.ultimo_prog[0] / self.ultimo_prog[1]))
 
     def fechar(self):
+        self.desligar_remoto(esperar=2.0)      # solta os botões no PS3 antes de fechar
         self.tl_parar()
         self.cancelar.set()
         self.salvar_cfg()

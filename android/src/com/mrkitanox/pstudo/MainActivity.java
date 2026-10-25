@@ -30,7 +30,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/** PSTudo para Android: Enviar jogos, Arquivos, Licenças, Console e Updates (sem a aba Tela). */
+/** PSTudo para Android: Enviar jogos, Arquivos, Licenças, Console, Updates e Controle (sem a aba Tela). */
 public class MainActivity extends Activity {
     public interface Resultado { void ok(Intent dados); }
 
@@ -50,6 +50,7 @@ public class MainActivity extends Activity {
     public TabLicencas tabLicencas;
     public TabConsole tabConsole;
     public TabUpdates tabUpdates;
+    public TabControle tabControle;
 
     // ------------------------------------------------------------------ ciclo de vida
     @Override
@@ -63,6 +64,7 @@ public class MainActivity extends Activity {
         tabLicencas = new TabLicencas(this);
         tabConsole = new TabConsole(this);
         tabUpdates = new TabUpdates(this);
+        tabControle = new TabControle(this);
 
         LinearLayout raiz = Ui.coluna(this);
         GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
@@ -102,7 +104,7 @@ public class MainActivity extends Activity {
         nav.setPadding(dp(5), dp(5), dp(5), dp(5));
         for (int i = 0; i < NOMES_ABAS.length; i++) {
             final int k = i;
-            TextView t = Ui.texto(this, NOMES_ABAS[i], 12, Ui.CINZA, Ui.FORTE);
+            TextView t = Ui.texto(this, NOMES_ABAS[i], 11, Ui.CINZA, Ui.FORTE);
             t.setSingleLine(true);
             t.setGravity(Gravity.CENTER);
             t.setPadding(0, dp(9), 0, dp(9));
@@ -125,6 +127,24 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        tabControle.desligar();          // não deixa botão "preso" no PS3 se sair do app
+        super.onPause();
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent e) {
+        if (tabControle != null && tabControle.tecla(e)) return true;
+        return super.dispatchKeyEvent(e);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent e) {
+        if (tabControle != null && tabControle.movimento(e)) return true;
+        return super.dispatchGenericMotionEvent(e);
+    }
+
+    @Override
     protected void onDestroy() {
         vivo = false;
         super.onDestroy();
@@ -132,10 +152,11 @@ public class MainActivity extends Activity {
 
     public int dp(float v) { return Ui.dp(this, v); }
 
-    static final String[] NOMES_ABAS = {"Enviar", "Arquivos", "Licenças", "Console", "Updates"};
+    static final String[] NOMES_ABAS = {"Enviar", "Arquivos", "Licenças", "Console", "Updates", "Controle"};
 
     // ------------------------------------------------------------------ abas
     public void mostrarAba(int k) {
+        if (aba == TabControle.ABA && k != TabControle.ABA) tabControle.desligar();   // solta os botões no PS3
         aba = k;
         for (int i = 0; i < abasTx.size(); i++) {
             TextView t = abasTx.get(i);
@@ -144,7 +165,7 @@ public class MainActivity extends Activity {
         }
         conteudo.removeAllViews();
         View v = k == 0 ? tabEnviar.view() : k == 1 ? tabArquivos.view() : k == 2 ? tabLicencas.view()
-                : k == 3 ? tabConsole.view() : tabUpdates.view();
+                : k == 3 ? tabConsole.view() : k == 4 ? tabUpdates.view() : tabControle.view();
         conteudo.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
@@ -239,6 +260,7 @@ public class MainActivity extends Activity {
             tabLicencas.statusMudou();
             tabConsole.statusMudou();
             tabUpdates.statusMudou();
+            tabControle.statusMudou();
         }
     }
 
