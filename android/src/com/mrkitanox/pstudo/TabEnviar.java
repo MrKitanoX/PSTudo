@@ -390,7 +390,7 @@ public class TabEnviar {
     private void mostrarProgresso() {
         float f = Math.min(1f, enviado / (float) Math.max(1, total));
         int pct = (int) (f * 100);
-        a.marcarAba(0, enviando ? "Enviando " + pct + "%" : null);
+        a.marcarAba(0, enviando ? "↑ " + pct + "%" : null);
         if (txPct == null || a.abaAtual() != 0 || !"enviando".equals(modo)) return;
         txPct.setText(pct + "%");
         barra.set(f);

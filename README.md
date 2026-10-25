@@ -25,6 +25,7 @@
 | **Converter para ISO** | Transforma jogos em pasta em ISO (com o `makeps3iso`) e, de forma experimental, PKGs de jogos de disco em ISO. |
 | **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), marcar vários itens de uma vez, enviar, baixar, renomear, criar pastas, apagar e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |
+| **Updates** | Lê os jogos do PS3 (pastas `GAMES`, ISOs e o que está em `/dev_hdd0/game`) ou aceita o código digitado (ex.: `BLUS30443`), busca os updates no mesmo servidor da Sony que o PS3 usa, confere o SHA-1 de cada `.pkg` e instala no PS3 pelo webMAN, um de cada vez, do mais antigo para o mais novo. No PC também dá para só baixar os `.pkg`. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution) e deixá-lo ligando sozinho 15 s depois do HEN (pelo `autoexec.bat` do webMAN), ajustar o analógico, ver e registrar controles no `xpad_devices.txt` (registrados à esquerda, disponíveis no PC à direita) e desinstalar o XPAD por completo se algo der errado. |
 | **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor), sem travar quando você transmite no Discord ou no OBS. |
 
@@ -37,7 +38,7 @@
 
 ## Android
 
-Também existe o **PSTudo para Android** (`PSTudo.apk` na página de [Releases](../../releases)), com as abas **Enviar jogos**, **Arquivos**, **Licenças** e **Console**. A aba Tela (placa de captura) e a conversão para ISO ficam só no PC.
+Também existe o **PSTudo para Android** (`PSTudo.apk` na página de [Releases](../../releases)), com as abas **Enviar jogos**, **Arquivos**, **Licenças**, **Console** e **Updates**. A aba Tela (placa de captura) e a conversão para ISO ficam só no PC.
 
 - Instale o APK no celular (o Android pede para permitir "instalar apps desconhecidos" para o app que abriu o arquivo).
 - O celular precisa estar no mesmo Wi-Fi do PS3. Durante um envio, deixe o app aberto: a tela fica ligada sozinha.

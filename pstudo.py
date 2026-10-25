@@ -749,9 +749,9 @@ BTN_HOVER = "#20345C"
 
 class Extras:
     # ================================================= abas
-    ABAS = [("enviar", "Enviar jogos", 104), ("arquivos", "Arquivos", 84), ("rap", "Licenças", 84),
-            ("console", "Console", 80), ("tela", "Tela", 64)]
-    ABAS_X = 461
+    ABAS = [("enviar", "Enviar jogos", 100), ("arquivos", "Arquivos", 78), ("rap", "Licenças", 78),
+            ("updates", "Updates", 78), ("console", "Console", 76), ("tela", "Tela", 58)]
+    ABAS_X = 430
 
     def _montar_abas(self):
         p, c = self.p, self.c
@@ -802,7 +802,8 @@ class Extras:
 
     def _mostrar_aba(self, k):
         {"enviar": self._tela_enviar, "arquivos": self.tela_arquivos, "rap": self.tela_rap,
-         "console": self.tela_console, "tela": self.tela_espelho}[k]()
+         "console": self.tela_console, "tela": self.tela_espelho,
+         "updates": self.tela_updates}[k]()
 
     def _tela_enviar(self):
         """Aba Enviar jogos: progresso se estiver enviando, resultado pendente, ou a tela inicial."""
@@ -4864,6 +4865,809 @@ _TK_PARA_PYGAME = {"return": "return", "space": "space", "tab": "tab", "backspac
                    "pause": "pause", "scroll_lock": "scroll lock"}
 
 
+# =============================================================== Updates de jogos (servidor da Sony)
+# O PS3 pergunta em https://a0.ww.np.dl.playstation.net/tpl/np/<ID>/<ID>-ver.xml quais updates existem.
+# Esse XML traz o link de cada .pkg (que fica na CDN da Sony) com tamanho e SHA-1.
+SONY_UPD_URL = "https://a0.ww.np.dl.playstation.net/tpl/np/{0}/{0}-ver.xml"
+# certificado raiz público da Sony usado por esse servidor (não vem nos navegadores nem no Windows)
+SONY_CA = """-----BEGIN CERTIFICATE-----
+MIID0jCCArqgAwIBAgIBADANBgkqhkiG9w0BAQUFADBUMQswCQYDVQQGEwJKUDEp
+MCcGA1UEChMgU29ueSBDb21wdXRlciBFbnRlcnRhaW5tZW50IEluYy4xGjAYBgNV
+BAMTEVNDRUkgRE5BUyBSb290IDA1MB4XDTA0MDcxMjA5MDExOVoXDTM3MTIwNjA5
+MDExOVowVDELMAkGA1UEBhMCSlAxKTAnBgNVBAoTIFNvbnkgQ29tcHV0ZXIgRW50
+ZXJ0YWlubWVudCBJbmMuMRowGAYDVQQDExFTQ0VJIEROQVMgUm9vdCAwNTCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBANmPeza8PwCqlI7esOGIkoSESnIN
+g72ZD3Ut63jy7SdothPIvGBqVZWYkIpqJYJd1I4Nh//IpXQCQL0PnJLrh9BBeowq
+Muf5NNq3Us80Ihiu9CvNEAEO18g3OFV1TYdSwQ5zUsk33OUeI7h4aBPDVcZXYeHt
+dbPLqe4K8igian5prrAD5S6h28t8aAm+qMWRo+bW25B/841XwDGBP7/IxZv8Yoio
+rCo80CVYe6lGoU08eeqQiaHI5zAF281DWZSoVfLjJUEWmEnxqr8aOhszRGePi+Ei
+7UQjHDuZX9rLhDI1zAND+BA259tn/iwOqVXe20OccJllHJcG4Ecmd98f5qMCAwEA
+AaOBrjCBqzAdBgNVHQ4EFgQUxlahM1tPzoN3YgVEhm0gV7Wv2twwfAYDVR0jBHUw
+c4AUxlahM1tPzoN3YgVEhm0gV7Wv2tyhWKRWMFQxCzAJBgNVBAYTAkpQMSkwJwYD
+VQQKEyBTb255IENvbXB1dGVyIEVudGVydGFpbm1lbnQgSW5jLjEaMBgGA1UEAxMR
+U0NFSSBETkFTIFJvb3QgMDWCAQAwDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQUF
+AAOCAQEACZPihjwXA27wJ03tEKcHAeFLi8aBw2ysH4GwuH1dWb3UpuznWOB0iQT1
+wQocnEFYCJx5XFEnj4aLWpSHLEq/sSO+my+aPoTEsy20ajF+YLYZm0bZxH50CJYh
+rkET4C2aC0XvhGp9k1JQ1o0W6+cFT5LTlXapsq8Btt31t+XDPX7RqGV4WGekt3hM
+T7xRc7JWXdAQijIrbYi8mtbM07KEGnPU6IT8C47+0mSurpwLOoWL1tPgo6ePpLNi
+c4quUMgh9RXVjeTyXOMmyYdeUm2gt7qErvQONli+6Epmhm0A2khpIMHSpQjTE8gV
+rZp42a6+zg1iYy2vFBOmiQ17GRUl0A==
+-----END CERTIFICATE-----
+"""
+PASTA_PKGS = "/dev_hdd0/packages"
+DISPOSITIVOS_JOGOS = ("/dev_hdd0", "/dev_usb000", "/dev_usb001")
+
+
+def normalizar_id(texto):
+    """'BLUS-30443', 'blus30443', 'Jogo [BLUS30443].iso' -> 'BLUS30443' (ou None)."""
+    import re
+    m = re.search(r"([A-Z]{4})[-_ ]?(\d{5})", (texto or "").upper())
+    return (m.group(1) + m.group(2)) if m else None
+
+
+def versao_num(v):
+    try:
+        return tuple(int(x) for x in str(v).strip().split(".") if x != "")
+    except ValueError:
+        return (0,)
+
+
+def fw_bonito(v):
+    """'03.5500' -> '3.55'."""
+    try:
+        a, b = str(v).split(".")
+        return f"{int(a)}.{b[:2]}"
+    except ValueError:
+        return str(v)
+
+
+def _contextos_sony():
+    """Primeiro tenta conferir o servidor com o certificado da Sony (ele é antigo, assinado com SHA-1).
+    Se o Python do PC recusar, cai para sem conferir: o .pkg é checado pelo SHA-1 de qualquer jeito."""
+    import ssl
+    ctx = ssl.create_default_context(cadata=SONY_CA)
+    try:
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except ssl.SSLError:
+        pass
+    if hasattr(ssl, "VERIFY_X509_STRICT"):
+        ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    solto = ssl.create_default_context()
+    solto.check_hostname = False
+    solto.verify_mode = ssl.CERT_NONE
+    try:
+        solto.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except ssl.SSLError:
+        pass
+    return ctx, solto
+
+
+def _abrir_sony(url, timeout=30):
+    import ssl
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    if not url.lower().startswith("https:"):
+        return urllib.request.urlopen(req, timeout=timeout)
+    ultimo = None
+    for ctx in _contextos_sony():
+        try:
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as e:
+            if not isinstance(e.reason, ssl.SSLError):
+                raise
+            ultimo = e
+    raise ultimo
+
+
+def _url_da_sony(url):
+    import urllib.parse
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host == "playstation.net" or host.endswith(".playstation.net")
+
+
+def buscar_updates(title_id):
+    """{'titulo': nome do jogo, 'pacotes': [{versao, tamanho, sha1, url, fw}, ...]} em ordem de versão."""
+    import xml.etree.ElementTree as ET
+    try:
+        with _abrir_sony(SONY_UPD_URL.format(title_id), 20) as r:
+            dados = r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return {"titulo": "", "pacotes": []}
+        raise
+    if not dados.strip():
+        return {"titulo": "", "pacotes": []}
+    raiz = ET.fromstring(dados)
+    pacotes, vistos = [], set()
+    for pk in raiz.iter("package"):
+        a = pk.attrib
+        url = a.get("url", "")
+        if not url or not _url_da_sony(url) or url in vistos:
+            continue
+        vistos.add(url)
+        pacotes.append({"versao": a.get("version", ""), "tamanho": int(a.get("size", "0") or 0),
+                        "sha1": a.get("sha1sum", "").lower(), "url": url, "fw": a.get("ps3_system_ver", "")})
+    titulo = ""
+    for t in raiz.iter("TITLE"):
+        if t.text and t.text.strip():
+            titulo = t.text.strip()
+    pacotes.sort(key=lambda p_: versao_num(p_["versao"]))
+    return {"titulo": titulo, "pacotes": pacotes}
+
+
+def nome_pkg(url):
+    import urllib.parse
+    return urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1]) or "update.pkg"
+
+
+class LeitorPkg:
+    """Lê o .pkg da Sony aos pedaços (serve de arquivo para o FTP), conta o progresso e confere o SHA-1.
+    O .pkg termina com 32 bytes que guardam o SHA-1 de todo o resto; o XML da Sony traz o mesmo valor."""
+
+    def __init__(self, resp, progresso, cancelar):
+        import hashlib
+        self.r, self.prog, self.cancelar = resp, progresso, cancelar
+        self.h = hashlib.sha1()
+        self.cauda = b""
+        self.n = 0
+
+    def read(self, n=BLOCO):
+        if self.cancelar.is_set():
+            raise Cancelado()
+        d = self.r.read(n)
+        if d:
+            junto = self.cauda + d
+            self.h.update(junto[:-32])
+            self.cauda = junto[-32:]
+            self.n += len(d)
+            self.prog(len(d))
+        return d
+
+    def conferir(self, sha1_xml, tamanho):
+        calc = self.h.hexdigest()
+        if tamanho and self.n != tamanho:
+            raise RuntimeError(f"O download veio incompleto ({formatar_tamanho(self.n)} de "
+                               f"{formatar_tamanho(tamanho)}).")
+        if calc != (sha1_xml or "") and calc != self.cauda[:20].hex():
+            raise RuntimeError("O arquivo baixado veio corrompido (o SHA-1 não confere). Tente de novo.")
+
+
+def sfo_de_bytes(d):
+    """PARAM.SFO (bytes) -> {chave: valor}."""
+    try:
+        if d[:4] != b"\0PSF":
+            return {}
+        k_ini, d_ini, n = struct.unpack_from("<III", d, 8)
+        res = {}
+        for i in range(n):
+            k_off, fmt, d_len, _max, d_off = struct.unpack_from("<HHIII", d, 20 + i * 16)
+            fim = d.index(b"\0", k_ini + k_off)
+            chave = d[k_ini + k_off:fim].decode("latin-1")
+            bruto = d[d_ini + d_off:d_ini + d_off + d_len]
+            if fmt == 0x0404:
+                res[chave] = struct.unpack("<I", bruto[:4])[0]
+            else:
+                res[chave] = bruto.split(b"\0")[0].decode("utf-8", "ignore")
+        return res
+    except Exception:
+        return {}
+
+
+def ler_bytes_remoto(ftp, caminho, limite=None, inicio=0):
+    """Lê um arquivo do PS3 (ou só um pedaço dele, a partir de 'inicio')."""
+    import io
+    buf = io.BytesIO()
+    ftp.voidcmd("TYPE I")
+    conn = ftp.transfercmd(f"RETR {caminho}", rest=inicio or None)
+    try:
+        while limite is None or buf.tell() < limite:
+            d = conn.recv(65536 if limite is None else min(65536, limite - buf.tell()))
+            if not d:
+                break
+            buf.write(d)
+    finally:
+        conn.close()
+    try:
+        ftp.voidresp()
+    except ftplib.all_errors:          # cortar a transferência no meio faz o servidor responder 426
+        pass
+    return buf.getvalue()
+
+
+def _sfo_remoto(ftp, caminho):
+    try:
+        return sfo_de_bytes(ler_bytes_remoto(ftp, caminho, 64 * 1024))
+    except ftplib.all_errors:
+        return {}
+
+
+def listar_jogos_ps3(ftp, avisar=None):
+    """Junta os jogos do PS3 (pastas GAMES, ISOs e o que estiver instalado em /dev_hdd0/game).
+    Devolve [{id, titulo, instalado, origens}] — 'instalado' é a maior versão vista (base ou update)."""
+    import re
+    jogos = {}
+
+    def add(tid, titulo, versao, origem):
+        if not tid:
+            return
+        j = jogos.setdefault(tid, {"id": tid, "titulo": "", "instalado": "", "origens": []})
+        if titulo and (not j["titulo"] or origem != "HDD"):
+            j["titulo"] = titulo
+        if versao and versao_num(versao) > versao_num(j["instalado"] or "0"):
+            j["instalado"] = versao
+        if origem not in j["origens"]:
+            j["origens"].append(origem)
+
+    for dev in DISPOSITIVOS_JOGOS:
+        try:
+            pastas = listar_remoto(ftp, f"{dev}/GAMES")
+        except ftplib.all_errors:
+            pastas = []
+        for nome, eh_pasta, _ in pastas:
+            if not eh_pasta:
+                continue
+            if avisar:
+                avisar(f"Lendo {legivel(nome)}…")
+            sfo = _sfo_remoto(ftp, f"{dev}/GAMES/{nome}/PS3_GAME/PARAM.SFO")
+            tid = normalizar_id(sfo.get("TITLE_ID", "")) or normalizar_id(nome)
+            add(tid, sfo.get("TITLE") or legivel(nome), sfo.get("APP_VER", ""), "Pasta")
+        try:
+            isos = listar_remoto(ftp, f"{dev}/PS3ISO")
+        except ftplib.all_errors:
+            isos = []
+        for nome, eh_pasta, _ in isos:
+            baixo = nome.lower()
+            if eh_pasta or not (baixo.endswith(".iso") or baixo.endswith(".iso.0")):
+                continue
+            if avisar:
+                avisar(f"Lendo {legivel(nome)}…")
+            tid = None
+            try:      # a ISO do PS3 guarda o código do jogo no setor 1 (posição 0x810)
+                tid = normalizar_id(ler_bytes_remoto(ftp, f"{dev}/PS3ISO/{nome}", 10, 0x810).decode("latin-1"))
+            except ftplib.all_errors:
+                pass
+            tid = tid or normalizar_id(nome)
+            titulo = re.sub(r"\s*[\[(][A-Z]{4}-?\d{5}[\])]\s*", " ", legivel(nome))
+            titulo = re.sub(r"\.iso(\.0)?$", "", titulo, flags=re.I).strip()
+            add(tid, titulo, "", "ISO")
+    # updates já instalados (e jogos da PSN) ficam em /dev_hdd0/game/<código>
+    try:
+        instalados = listar_remoto(ftp, "/dev_hdd0/game")
+    except ftplib.all_errors:
+        instalados = []
+    for nome, eh_pasta, _ in instalados:
+        if not eh_pasta or normalizar_id(nome) != nome.upper():
+            continue
+        if avisar:
+            avisar(f"Lendo {nome}…")
+        sfo = _sfo_remoto(ftp, f"/dev_hdd0/game/{nome}/PARAM.SFO")
+        cat = str(sfo.get("CATEGORY", "")).upper()
+        if cat not in ("GD", "HG", "DG"):      # GD = update de jogo; HG = jogo da PSN/HDD
+            continue
+        add(nome.upper(), sfo.get("TITLE", ""), sfo.get("APP_VER", ""), "HDD")
+    return sorted(jogos.values(), key=lambda j_: (sem_acento(j_["titulo"] or j_["id"]).lower(), j_["id"]))
+
+
+def versao_instalada(ftp, tid):
+    sfo = _sfo_remoto(ftp, f"/dev_hdd0/game/{tid}/PARAM.SFO")
+    return sfo.get("APP_VER", "") if str(sfo.get("CATEGORY", "")).upper() in ("GD", "HG", "DG") else ""
+
+
+class Updates:
+    # ================================================= aba UPDATES
+    def _up(self):
+        if not hasattr(self, "up_estado"):
+            self.up_estado = {"jogos": None, "lendo": False, "sel": None, "info": {}, "buscando": set(),
+                              "baixando": False, "msg": ("", CINZA), "frac": None, "cancelar": threading.Event()}
+        return self.up_estado
+
+    def _up_ativo(self):
+        return self.aba == "updates" and getattr(self, "up_lbl", None) is not None and self.up_lbl.winfo_exists()
+
+    def tela_updates(self):
+        self.limpar()
+        st = self._up()
+        p, c = self.p, self.c
+        x0, y0, w, h = 48, 116, 864, 466
+        c.create_image(p.px(x0 + w / 2), p.px(y0 + h / 2), tags="view",
+                       image=p.ret(w, h, 20, PAINEL_RGB + (255,), outline=(255, 255, 255, 30), largura=1))
+        fonte = ctk.CTkFont(family=F_REG, size=13)
+        fonte_b = ctk.CTkFont(family=F_SEMI, size=13)
+        painel = ctk.CTkFrame(self.root, fg_color=PAINEL, corner_radius=0, width=w - 28, height=h - 28)
+        painel.grid_propagate(False)
+        painel.pack_propagate(False)
+        c.create_window(p.px(x0 + 14), p.px(y0 + 14), window=painel, anchor="nw", tags="view")
+        self.widgets.append(painel)
+        painel.grid_columnconfigure(0, weight=0)
+        painel.grid_columnconfigure(1, weight=1)
+        painel.grid_rowconfigure(1, weight=1)
+
+        def botao(pai_, texto, cmd, largura=None, tipo="normal"):
+            cores = {"normal": (BTN, BTN_HOVER, BRANCO), "azul": ("#0070D1", "#1888F0", BRANCO),
+                     "perigo": ("#3A1620", "#5A1E2C", "#FCA5A5")}[tipo]
+            return ctk.CTkButton(pai_, text=texto, command=cmd, height=34, corner_radius=17, font=fonte_b,
+                                 width=largura or 0, fg_color=cores[0], hover_color=cores[1], text_color=cores[2],
+                                 text_color_disabled="#6B7488")
+        self._up_botao = botao
+
+        topo = ctk.CTkFrame(painel, fg_color="transparent")
+        topo.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 8))
+        self.up_campo = ctk.CTkEntry(topo, height=34, corner_radius=17, fg_color="#0A1222", border_color="#26324D",
+                                     text_color=BRANCO, font=fonte, placeholder_text_color=CINZA_ESCURO, width=300,
+                                     placeholder_text="Código do jogo (ex.: BLUS30443)")
+        self.up_campo.pack(side="left")
+        self.up_campo.bind("<Return>", lambda e: self.up_buscar_codigo())
+        botao(topo, "Buscar updates", self.up_buscar_codigo).pack(side="left", padx=(6, 0))
+        self.up_btn_ler = botao(topo, "⟳ Ler jogos do PS3", self.up_ler_jogos)
+        self.up_btn_ler.pack(side="right")
+
+        # ---- esquerda: jogos do PS3
+        esq = ctk.CTkFrame(painel, fg_color="transparent", width=300)
+        esq.grid(row=1, column=0, sticky="nsew", padx=(8, 4))
+        esq.grid_propagate(False)
+        esq.grid_rowconfigure(1, weight=1)
+        esq.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(esq, text="Jogos no PS3", font=ctk.CTkFont(family=F_SEMI, size=14), text_color=BRANCO,
+                     anchor="w").grid(row=0, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self.up_lista_jogos = ctk.CTkScrollableFrame(esq, fg_color="#0B1426", corner_radius=12,
+                                                     scrollbar_button_color="#1E2A44",
+                                                     scrollbar_button_hover_color="#2A3A5E")
+        self.up_lista_jogos.grid(row=1, column=0, sticky="nsew")
+
+        # ---- direita: updates do jogo escolhido
+        dir_ = ctk.CTkFrame(painel, fg_color="transparent")
+        dir_.grid(row=1, column=1, sticky="nsew", padx=(4, 8))
+        dir_.grid_rowconfigure(1, weight=1)
+        dir_.grid_columnconfigure(0, weight=1)
+        self.up_cab = ctk.CTkLabel(dir_, text="", font=ctk.CTkFont(family=F_SEMI, size=14), text_color=BRANCO,
+                                   anchor="w", justify="left", wraplength=480)
+        self.up_cab.grid(row=0, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self.up_lista_pkgs = ctk.CTkScrollableFrame(dir_, fg_color="#0B1426", corner_radius=12,
+                                                    scrollbar_button_color="#1E2A44",
+                                                    scrollbar_button_hover_color="#2A3A5E")
+        self.up_lista_pkgs.grid(row=1, column=0, sticky="nsew")
+
+        # ---- rodapé: andamento e ações
+        rod = ctk.CTkFrame(painel, fg_color="transparent")
+        rod.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 2))
+        rod.grid_columnconfigure(0, weight=1)
+        self.up_barra = ctk.CTkProgressBar(rod, height=6, corner_radius=3, fg_color="#1A2744",
+                                           progress_color="#1888F0")
+        self.up_barra.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.up_lbl = ctk.CTkLabel(rod, text="", font=fonte, text_color=CINZA, anchor="w", justify="left",
+                                   wraplength=520)
+        self.up_lbl.grid(row=1, column=0, sticky="ew")
+        acoes = ctk.CTkFrame(rod, fg_color="transparent")
+        acoes.grid(row=1, column=1, sticky="e")
+        self.up_btn_cancelar = botao(acoes, "Cancelar", self.up_cancelar, tipo="perigo")
+        self.up_btn_pc = botao(acoes, "Baixar no PC", lambda: self.up_baixar(no_ps3=False))
+        self.up_btn_pc.pack(side="left", padx=(0, 6))
+        self.up_btn_ps3 = botao(acoes, "Instalar no PS3", lambda: self.up_baixar(no_ps3=True), tipo="azul")
+        self.up_btn_ps3.pack(side="left")
+
+        self._up_desenhar_jogos()
+        self._up_desenhar_pkgs()
+        self._up_msg(*st["msg"])
+        self._up_progresso(st["frac"])
+        self._up_botoes()
+        if st["jogos"] is None and not st["lendo"] and self.estado_ps3 == "ok":
+            self.up_ler_jogos()
+
+    # ---------------- pedaços da tela
+    def _up_msg(self, texto, cor=CINZA):
+        self._up()["msg"] = (texto, cor)
+        if self._up_ativo():
+            self.up_lbl.configure(text=texto, text_color=cor)
+
+    def _up_progresso(self, frac):
+        self._up()["frac"] = frac
+        if not self._up_ativo():
+            return
+        if frac is None:
+            self.up_barra.grid_remove()
+        else:
+            self.up_barra.grid()
+            self.up_barra.set(max(0.0, min(1.0, frac)))
+
+    def _up_faltando(self, tid):
+        info = self._up()["info"].get(tid)
+        if not isinstance(info, dict):
+            return []
+        inst = versao_num(self._up_instalado(tid) or "0")
+        return [pk for pk in info["pacotes"] if versao_num(pk["versao"]) > inst]
+
+    def _up_instalado(self, tid):
+        for j in self._up()["jogos"] or []:
+            if j["id"] == tid:
+                return j["instalado"]
+        return ""
+
+    def _up_botoes(self):
+        if not self._up_ativo():
+            return
+        st = self._up()
+        tid = st["sel"]
+        info = st["info"].get(tid)
+        tem = isinstance(info, dict) and bool(info["pacotes"])
+        falta = self._up_faltando(tid) if tem else []
+        livre = not st["baixando"]
+        self.up_btn_pc.configure(state="normal" if livre and tem else "disabled")
+        self.up_btn_ps3.configure(state="normal" if livre and falta and self.estado_ps3 == "ok" else "disabled",
+                                  text="Instalar no PS3" if (falta or not tem) else "Já está atualizado")
+        self.up_btn_ler.configure(state="normal" if livre and not st["lendo"] and self.estado_ps3 == "ok"
+                                  else "disabled")
+        if st["baixando"]:
+            self.up_btn_cancelar.pack(side="left", padx=(0, 6), before=self.up_btn_pc)
+        else:
+            self.up_btn_cancelar.pack_forget()
+
+    def _up_desenhar_jogos(self):
+        if not self._up_ativo():
+            return
+        st = self._up()
+        for w_ in self.up_lista_jogos.winfo_children():
+            w_.destroy()
+        f_nome = ctk.CTkFont(family=F_SEMI, size=13)
+        f_sub = ctk.CTkFont(family=F_REG, size=11)
+        if st["jogos"] is None:
+            txt = "Lendo os jogos do PS3…" if st["lendo"] else (
+                "Conecte o PS3 para ver os jogos." if self.estado_ps3 != "ok" else "")
+            ctk.CTkLabel(self.up_lista_jogos, text=txt, font=f_sub, text_color=CINZA, wraplength=240).pack(pady=20)
+            return
+        jogos = list(st["jogos"])
+        # códigos digitados à mão que não estão no PS3 também aparecem
+        for tid in st["info"]:
+            if not any(j["id"] == tid for j in jogos):
+                jogos.insert(0, {"id": tid, "titulo": "", "instalado": "", "origens": ["Digitado"]})
+        if not jogos:
+            ctk.CTkLabel(self.up_lista_jogos, text="Nenhum jogo encontrado.\nDigite o código do jogo acima.",
+                         font=f_sub, text_color=CINZA, justify="center").pack(pady=20)
+            return
+        for j in jogos:
+            info = st["info"].get(j["id"])
+            titulo = j["titulo"] or (info.get("titulo") if isinstance(info, dict) else "") or j["id"]
+            sel = j["id"] == st["sel"]
+            linha = ctk.CTkFrame(self.up_lista_jogos, fg_color="#1A3358" if sel else "#0F1B33", corner_radius=10,
+                                 cursor="hand2")
+            linha.pack(fill="x", pady=2, padx=(0, 4))
+            n = ctk.CTkLabel(linha, text=titulo if len(titulo) <= 34 else titulo[:33] + "…", font=f_nome,
+                             text_color=BRANCO, anchor="w")
+            n.pack(fill="x", padx=10, pady=(6, 0))
+            sub = j["id"] + (f"  •  v{j['instalado']}" if j["instalado"] else "")
+            if isinstance(info, dict):
+                falta = len(self._up_faltando(j["id"]))
+                sub += f"  •  {falta} update(s) novo(s)" if falta else ("  •  atualizado" if info["pacotes"]
+                                                                        else "  •  sem updates")
+            s = ctk.CTkLabel(linha, text=sub, font=f_sub, text_color="#7FB2F0" if sel else CINZA_ESCURO, anchor="w")
+            s.pack(fill="x", padx=10, pady=(0, 6))
+            for w_ in (linha, n, s):
+                w_.bind("<Button-1>", lambda e, t=j["id"]: self.up_escolher(t))
+
+    def _up_desenhar_pkgs(self):
+        if not self._up_ativo():
+            return
+        st = self._up()
+        for w_ in self.up_lista_pkgs.winfo_children():
+            w_.destroy()
+        f_v = ctk.CTkFont(family=F_SEMI, size=13)
+        f_sub = ctk.CTkFont(family=F_REG, size=11)
+        tid = st["sel"]
+        if not tid:
+            self.up_cab.configure(text="Escolha um jogo")
+            ctk.CTkLabel(self.up_lista_pkgs, text="Escolha um jogo à esquerda ou digite o código dele.\n"
+                                                  "Os updates vêm direto do servidor da Sony.",
+                         font=f_sub, text_color=CINZA, justify="center").pack(pady=30)
+            return
+        info = st["info"].get(tid)
+        jogo = next((j for j in st["jogos"] or [] if j["id"] == tid), None)
+        nome = (jogo and jogo["titulo"]) or (info.get("titulo") if isinstance(info, dict) else "") or tid
+        inst = self._up_instalado(tid)
+        self.up_cab.configure(text=f"{nome}   ({tid})" + (f"   •   no PS3: v{inst}" if inst else ""))
+        if tid in st["buscando"]:
+            ctk.CTkLabel(self.up_lista_pkgs, text="Perguntando ao servidor da Sony…", font=f_sub,
+                         text_color=CINZA).pack(pady=30)
+            return
+        if isinstance(info, Exception):
+            ctk.CTkLabel(self.up_lista_pkgs, text=f"Não consegui falar com o servidor da Sony.\n({str(info)[:90]})",
+                         font=f_sub, text_color="#F87171", justify="center").pack(pady=24)
+            self._up_botao(self.up_lista_pkgs, "Tentar de novo", lambda: self.up_escolher(tid, True)).pack()
+            return
+        if not info:
+            return
+        if not info["pacotes"]:
+            ctk.CTkLabel(self.up_lista_pkgs, text="A Sony não tem updates para este jogo.", font=f_sub,
+                         text_color=CINZA).pack(pady=30)
+            return
+        inst_n = versao_num(inst or "0")
+        total = 0
+        for pk in info["pacotes"]:
+            novo = versao_num(pk["versao"]) > inst_n
+            if novo:
+                total += pk["tamanho"]
+            linha = ctk.CTkFrame(self.up_lista_pkgs, fg_color="#0F1B33", corner_radius=10)
+            linha.pack(fill="x", pady=2, padx=(0, 4))
+            ctk.CTkLabel(linha, text=f"Versão {pk['versao']}", font=f_v, text_color=BRANCO).pack(
+                side="left", padx=(12, 10), pady=8)
+            sub = formatar_tamanho(pk["tamanho"]) + (f"  •  precisa do sistema {fw_bonito(pk['fw'])}" if pk["fw"]
+                                                    else "")
+            ctk.CTkLabel(linha, text=sub, font=f_sub, text_color=CINZA).pack(side="left")
+            ctk.CTkLabel(linha, text="novo" if novo else "✓ instalado", font=f_sub,
+                         text_color="#7FB2F0" if novo else "#34D399").pack(side="right", padx=12)
+        falta = self._up_faltando(tid)
+        if not st["baixando"] and not self.up_lbl.cget("text"):
+            if falta:
+                self._up_msg(f"{len(falta)} update(s) para instalar • {formatar_tamanho(total)}")
+            else:
+                self._up_msg("Este jogo já está com o último update.", "#34D399")
+
+    # ---------------- ações
+    def up_ler_jogos(self):
+        st = self._up()
+        if st["lendo"] or self.estado_ps3 != "ok":
+            return
+        st["lendo"] = True
+        st["jogos"] = None
+        self._up_desenhar_jogos()
+        self._up_botoes()
+        self._up_msg("Lendo os jogos do PS3…")
+
+        def avisar(t):
+            self.fila.put(("cb", lambda t=t: self._up_msg(t)))
+
+        def ok(jogos):
+            st["jogos"] = jogos
+            self._up_msg(f"{len(jogos)} jogo(s) encontrado(s). Escolha um para ver os updates." if jogos else
+                         "Não achei jogos no PS3. Digite o código do jogo acima.")
+            self._up_desenhar_jogos()
+            self._up_desenhar_pkgs()
+
+        def erro(e):
+            st["jogos"] = []
+            self._up_msg(f"Não consegui ler os jogos ({str(e)[:60]})", "#F87171")
+            self._up_desenhar_jogos()
+
+        def fim():
+            st["lendo"] = False
+            self._up_botoes()
+        self.em_thread(lambda ftp: listar_jogos_ps3(ftp, avisar), ok, erro, fim)
+
+    def up_buscar_codigo(self):
+        tid = normalizar_id(self.up_campo.get())
+        if not tid:
+            self._up_msg("Digite o código do jogo, como BLUS30443 (fica na capa ou no nome da ISO).", "#FBBF24")
+            return
+        self.up_campo.delete(0, "end")
+        self.up_escolher(tid, True)
+
+    def up_escolher(self, tid, buscar_de_novo=False):
+        st = self._up()
+        st["sel"] = tid
+        if not st["baixando"]:
+            self._up_msg("")
+        if buscar_de_novo or tid not in st["info"] or isinstance(st["info"].get(tid), Exception):
+            st["info"].pop(tid, None)
+            st["buscando"].add(tid)
+
+            def tarefa():
+                try:
+                    r = buscar_updates(tid)
+                except Exception as e:
+                    r = e
+                self.fila.put(("cb", lambda: pronto(r)))
+
+            def pronto(r):
+                st["buscando"].discard(tid)
+                st["info"][tid] = r
+                if st["sel"] == tid:
+                    self._up_desenhar_pkgs()
+                    self._up_botoes()
+                self._up_desenhar_jogos()
+            threading.Thread(target=tarefa, daemon=True).start()
+        self._up_desenhar_jogos()
+        self._up_desenhar_pkgs()
+        self._up_botoes()
+
+    def up_cancelar(self):
+        self._up()["cancelar"].set()
+        self._up_msg("Cancelando…", "#FBBF24")
+
+    def up_baixar(self, no_ps3):
+        st = self._up()
+        tid = st["sel"]
+        info = st["info"].get(tid)
+        if st["baixando"] or not isinstance(info, dict) or not info["pacotes"]:
+            return
+        lista = self._up_faltando(tid) if no_ps3 else (self._up_faltando(tid) or list(info["pacotes"]))
+        if not lista:
+            return
+        pasta = None
+        if not no_ps3:
+            pasta = filedialog.askdirectory(title="Onde salvar os updates?", parent=self.root)
+            if not pasta:
+                return
+            pasta = os.path.join(pasta, tid)
+            os.makedirs(pasta, exist_ok=True)
+        st["baixando"] = True
+        st["cancelar"] = threading.Event()
+        cancelar = st["cancelar"]
+        self._up_botoes()
+        self._up_progresso(0)
+        total = sum(pk["tamanho"] for pk in lista) or 1
+        andamento = {"feito": 0, "t0": time.time(), "ultimo": 0.0, "texto": ""}
+        ip = self.cfg.get("ip")
+
+        def avisar(t, cor=CINZA):
+            self.fila.put(("cb", lambda: self._up_msg(t, cor)))
+
+        def contar(n):
+            andamento["feito"] += n
+            agora = time.time()
+            if agora - andamento["ultimo"] < 0.25:
+                return
+            andamento["ultimo"] = agora
+            feito = andamento["feito"]
+            vel = feito / max(0.5, agora - andamento["t0"])
+            txt = (f"{andamento['texto']}  •  {formatar_tamanho(feito)} de {formatar_tamanho(total)}"
+                   f"  •  {formatar_tamanho(vel)}/s")
+            self.fila.put(("cb", lambda f=feito / total, t=txt: (self._up_progresso(f), self._up_msg(t))))
+
+        def trabalho():
+            ftp = None
+            try:
+                if no_ps3:
+                    ftp = conectar(self.cfg)
+                    try:
+                        ftp.mkd(PASTA_PKGS)
+                    except ftplib.error_perm:
+                        pass
+                enviados = []
+                for i, pk in enumerate(lista, 1):
+                    nome = nome_pkg(pk["url"])
+                    andamento["texto"] = f"Baixando a versão {pk['versao']} ({i} de {len(lista)})"
+                    avisar(andamento["texto"] + "…")
+                    destino = f"{PASTA_PKGS}/{para_ftp(nome)}"
+                    if no_ps3 and tamanho_remoto(ftp, destino) == pk["tamanho"]:
+                        contar(pk["tamanho"])          # já estava no PS3 de uma vez anterior
+                        enviados.append((pk, destino))
+                        continue
+                    with _abrir_sony(pk["url"], 60) as resp:
+                        leitor = LeitorPkg(resp, contar, cancelar)
+                        if no_ps3:
+                            try:
+                                ftp.storbinary(f"STOR {destino}", leitor, blocksize=BLOCO)
+                                leitor.conferir(pk["sha1"], pk["tamanho"])
+                            except BaseException:
+                                try:
+                                    ftp.delete(destino)
+                                except ftplib.all_errors:
+                                    pass
+                                raise
+                            enviados.append((pk, destino))
+                        else:
+                            local = os.path.join(pasta, nome)
+                            try:
+                                with open(local, "wb") as f:
+                                    while True:
+                                        d = leitor.read(BLOCO)
+                                        if not d:
+                                            break
+                                        f.write(d)
+                                leitor.conferir(pk["sha1"], pk["tamanho"])
+                            except BaseException:
+                                try:
+                                    os.remove(local)
+                                except OSError:
+                                    pass
+                                raise
+                if not no_ps3:
+                    return ("pc", len(lista), pasta)
+                # instala um de cada vez, da versão mais antiga para a mais nova
+                self.fila.put(("cb", lambda: self._up_progresso(None)))
+                for i, (pk, destino) in enumerate(enviados, 1):
+                    if cancelar.is_set():
+                        raise Cancelado()
+                    avisar(f"Instalando a versão {pk['versao']} no PS3 ({i} de {len(enviados)})… "
+                           f"fique no XMB, sem abrir jogos.")
+                    if not self._up_instalar(ftp, ip, tid, pk, destino, cancelar):
+                        return ("manual", len(enviados), None)
+                return ("ps3", len(enviados), None)
+            finally:
+                if ftp:
+                    try:
+                        ftp.quit()
+                    except Exception:
+                        ftp.close()
+
+        def rodar():
+            try:
+                r = trabalho()
+                self.fila.put(("cb", lambda: fim_ok(r)))
+            except Cancelado:
+                self.fila.put(("cb", lambda: fim_erro("Cancelado.", "#FBBF24")))
+            except Exception as e:
+                self.fila.put(("cb", lambda e=e: fim_erro(f"Não deu certo: {str(e)[:110]}", "#F87171")))
+
+        def terminar():
+            st["baixando"] = False
+            self._up_progresso(None)
+            self._up_botoes()
+
+        def fim_ok(r):
+            terminar()
+            tipo, n, onde = r
+            if tipo == "pc":
+                self._up_msg(f"✓ {n} update(s) salvo(s) em {onde}", "#34D399")
+                if self.aba != "updates":
+                    self._aviso_app("Updates baixados no PC")
+                return
+            if tipo == "manual":
+                self._up_msg(f"✓ {n} update(s) enviado(s) para /dev_hdd0/packages. Para instalar, no PS3 abra "
+                             "Package Manager › Install Package Files › Standard e instale do mais antigo "
+                             "para o mais novo.", "#34D399")
+            else:
+                self._up_msg(f"✓ {n} update(s) instalado(s) no PS3.", "#34D399")
+                if self.aba != "updates":
+                    self._aviso_app("Updates instalados no PS3")
+            self._up_atualizar_versao(tid)
+
+        def fim_erro(t, cor):
+            terminar()
+            self._up_msg(t, cor)
+        threading.Thread(target=rodar, daemon=True).start()
+
+    def _up_instalar(self, ftp, ip, tid, pk, destino, cancelar):
+        """Pede ao webMAN para instalar o .pkg e espera terminar (o webMAN apaga o arquivo depois de instalar).
+        False = este webMAN não instala .pkg sozinho (o usuário instala pelo Package Manager)."""
+        try:
+            http_webman(ip, "install.ps3" + _url_caminho(destino), timeout=30)
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                raise RuntimeError(f"O PS3 recusou instalar a versão {pk['versao']}. Saia do jogo (fique no XMB) "
+                                   f"e confira o espaço livre.") from None
+            return False
+        except (socket.timeout, TimeoutError, ConnectionError):
+            pass
+        except urllib.error.URLError as e:
+            if not isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+                raise
+        alvo = versao_num(pk["versao"])
+        fim = time.time() + 30 * 60
+        while time.time() < fim:
+            if cancelar.is_set():
+                raise Cancelado()
+            time.sleep(3)
+            try:
+                ftp.voidcmd("TYPE I")
+                try:
+                    ftp.size(destino)
+                    sumiu = False
+                except ftplib.error_perm:          # 550 = o arquivo não existe mais
+                    sumiu = True
+                if sumiu or versao_num(versao_instalada(ftp, tid) or "0") >= alvo:
+                    time.sleep(2)
+                    return True
+            except ftplib.all_errors:              # o PS3 fica ocupado instalando: conecta de novo
+                try:
+                    ftp.close()
+                    ftp.connect(self.cfg["ip"], int(self.cfg.get("porta", 21)), timeout=30)
+                    ftp.login(self.cfg.get("usuario") or "anonymous", self.cfg.get("senha") or "")
+                except ftplib.all_errors:
+                    pass
+        raise RuntimeError(f"A instalação da versão {pk['versao']} não terminou em 30 minutos. "
+                           "Confira no PS3 em Package Manager.")
+
+    def _up_atualizar_versao(self, tid):
+        def ok(v):
+            for j in self._up()["jogos"] or []:
+                if j["id"] == tid and v and versao_num(v) > versao_num(j["instalado"] or "0"):
+                    j["instalado"] = v
+            self._up_desenhar_jogos()
+            self._up_desenhar_pkgs()
+            self._up_botoes()
+        self.em_thread(lambda ftp: versao_instalada(ftp, tid), ok, lambda e: None)
+
+
 def tecla_tk_para_nome(keysym):
     """Converte a tecla do Tk para o nome usado pelo pygame. None = tecla não permitida."""
     k = keysym.lower()
@@ -4883,7 +5687,7 @@ def nome_bonito(tecla):
 
 
 # =============================================================== app
-class App(Extras, Console, Controles, Tela, Conversor):
+class App(Extras, Console, Controles, Tela, Conversor, Updates):
     def __init__(self):
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
@@ -5010,6 +5814,11 @@ class App(Extras, Console, Controles, Tela, Conversor):
             self.btn_enviar.set_ativo(estado == "ok" and pronto)
         if estado == "ok" and getattr(self, "aba", "") == "arquivos" and getattr(self, "fm_desconectado", False):
             self.fm_listar()
+        if getattr(self, "aba", "") == "updates" and self._up_ativo():
+            self._up_botoes()
+            st = self._up()
+            if estado == "ok" and st["jogos"] is None and not st["lendo"]:
+                self.up_ler_jogos()
         if getattr(self, "aba", "") == "console" and self._cn_ativo():
             self._cn_botoes()
             if estado == "ok" and self.cn_dados is None:

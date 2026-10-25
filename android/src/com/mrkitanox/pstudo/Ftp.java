@@ -276,6 +276,39 @@ public class Ftp {
         resposta(226, 250);
     }
 
+    /** Lê só um pedaço do arquivo (a partir de 'inicio') e corta a transferência. */
+    public byte[] lerPedaco(String remoto, long inicio, int limite) throws IOException {
+        tipoBinario();
+        Socket d = pasv();
+        if (inicio > 0) {
+            int r = cmd("REST " + inicio);
+            if (r != 350) { d.close(); throw new Erro(r, ultima); }
+        }
+        int c = cmd("RETR " + remoto);
+        if (c != 150 && c != 125) { d.close(); throw new Erro(c, ultima); }
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        try {
+            InputStream i = d.getInputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            while (b.size() < limite && (n = i.read(buf, 0, Math.min(buf.length, limite - b.size()))) > 0)
+                b.write(buf, 0, n);
+        } finally {
+            d.close();
+        }
+        resposta();      // 226, ou 426 quando a transferência foi cortada
+        return b.toByteArray();
+    }
+
+    /** true = existe, false = o PS3 disse que não existe (550). Erro de conexão vira exceção. */
+    public boolean existeOuErro(String caminho) throws IOException {
+        tipoBinario();
+        int c = cmd("SIZE " + caminho);
+        if (c == 213) return true;
+        if (c == 550) return false;
+        throw new Erro(c, ultima);
+    }
+
     public byte[] baixar(String remoto) throws IOException {
         ByteArrayOutputStream b = new ByteArrayOutputStream();
         baixar(remoto, b, null);

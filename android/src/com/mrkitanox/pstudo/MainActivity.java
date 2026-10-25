@@ -30,7 +30,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/** PSTudo para Android: Enviar jogos, Arquivos, Licenças e Console (sem a aba Tela). */
+/** PSTudo para Android: Enviar jogos, Arquivos, Licenças, Console e Updates (sem a aba Tela). */
 public class MainActivity extends Activity {
     public interface Resultado { void ok(Intent dados); }
 
@@ -49,6 +49,7 @@ public class MainActivity extends Activity {
     public TabArquivos tabArquivos;
     public TabLicencas tabLicencas;
     public TabConsole tabConsole;
+    public TabUpdates tabUpdates;
 
     // ------------------------------------------------------------------ ciclo de vida
     @Override
@@ -61,6 +62,7 @@ public class MainActivity extends Activity {
         tabArquivos = new TabArquivos(this);
         tabLicencas = new TabLicencas(this);
         tabConsole = new TabConsole(this);
+        tabUpdates = new TabUpdates(this);
 
         LinearLayout raiz = Ui.coluna(this);
         GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
@@ -98,10 +100,10 @@ public class MainActivity extends Activity {
         LinearLayout nav = Ui.linha(this);
         nav.setBackground(Ui.fundo(this, 0xF00A1222, 24, Ui.BORDA));
         nav.setPadding(dp(5), dp(5), dp(5), dp(5));
-        String[] nomes = {"Enviar jogos", "Arquivos", "Licenças", "Console"};
-        for (int i = 0; i < nomes.length; i++) {
+        for (int i = 0; i < NOMES_ABAS.length; i++) {
             final int k = i;
-            TextView t = Ui.texto(this, nomes[i], 13, Ui.CINZA, Ui.FORTE);
+            TextView t = Ui.texto(this, NOMES_ABAS[i], 12, Ui.CINZA, Ui.FORTE);
+            t.setSingleLine(true);
             t.setGravity(Gravity.CENTER);
             t.setPadding(0, dp(9), 0, dp(9));
             t.setOnClickListener(new View.OnClickListener() {
@@ -130,6 +132,8 @@ public class MainActivity extends Activity {
 
     public int dp(float v) { return Ui.dp(this, v); }
 
+    static final String[] NOMES_ABAS = {"Enviar", "Arquivos", "Licenças", "Console", "Updates"};
+
     // ------------------------------------------------------------------ abas
     public void mostrarAba(int k) {
         aba = k;
@@ -139,15 +143,15 @@ public class MainActivity extends Activity {
             t.setBackground(i == k ? Ui.fundo(this, 0xFFF2F5FA, 19, 0) : null);
         }
         conteudo.removeAllViews();
-        View v = k == 0 ? tabEnviar.view() : k == 1 ? tabArquivos.view() : k == 2 ? tabLicencas.view() : tabConsole.view();
+        View v = k == 0 ? tabEnviar.view() : k == 1 ? tabArquivos.view() : k == 2 ? tabLicencas.view()
+                : k == 3 ? tabConsole.view() : tabUpdates.view();
         conteudo.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     public int abaAtual() { return aba; }
 
     public void marcarAba(int k, String texto) {
-        String[] nomes = {"Enviar jogos", "Arquivos", "Licenças", "Console"};
-        abasTx.get(k).setText(texto == null ? nomes[k] : texto);
+        abasTx.get(k).setText(texto == null ? NOMES_ABAS[k] : texto);
     }
 
     // ------------------------------------------------------------------ threads
@@ -234,6 +238,7 @@ public class MainActivity extends Activity {
             tabArquivos.statusMudou();
             tabLicencas.statusMudou();
             tabConsole.statusMudou();
+            tabUpdates.statusMudou();
         }
     }
 
