@@ -23,7 +23,7 @@
 |---|---|
 | **Enviar jogos** | Envia jogos em pasta (BLUS, BLES…), ISOs e PKGs pela rede. Encontra o PS3 sozinho, mostra o nome real do jogo, escolhe a pasta certa (GAMES, PS3ISO, packages) e não reenvia o que já está no console. Dá para usar as outras abas durante o envio, e um som avisa quando termina. |
 | **Converter para ISO** | Transforma jogos em pasta em ISO (com o `makeps3iso`) e, de forma experimental, PKGs de jogos de disco em ISO. |
-| **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), marcar vários itens de uma vez, enviar, baixar, renomear, criar pastas, apagar (com confirmação) e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
+| **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), marcar vários itens de uma vez, enviar, baixar, renomear, criar pastas, apagar e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution), ajustar o analógico e registrar os controles ligados no PC no `xpad_devices.txt`. |
 | **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor), sem travar quando você transmite no Discord ou no OBS. |

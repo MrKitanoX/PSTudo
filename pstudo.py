@@ -844,7 +844,8 @@ class Extras:
     def _janela(self, titulo, largura, altura):
         j = ctk.CTkToplevel(self.root)
         j.title(titulo)
-        j.geometry(f"{largura}x{altura}")
+        f_ = self.p.s / self.escala_base         # janela maximizada: as letras crescem, a janela também
+        j.geometry(f"{int(largura * f_)}x{int(altura * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -1431,12 +1432,10 @@ class Extras:
 
     def _bloquear_sistema(self):
         if any(self.fm_path == s_ or self.fm_path.startswith(s_ + "/") for s_ in PASTAS_SISTEMA):
-            self.dialogo("Pasta protegida", "Por segurança, o app não grava arquivos nas pastas do sistema do PS3.",
-                         cancelar=False)
+            self.fm_status("Por segurança, o app não grava arquivos nas pastas do sistema do PS3.", "#F87171")
             return True
         if self.fm_path == "/":
-            self.dialogo("Escolha uma pasta", "Entre no HD (dev_hdd0) ou no pendrive antes de enviar arquivos.",
-                         cancelar=False)
+            self.fm_status("Entre no HD (dev_hdd0) ou no pendrive antes de enviar arquivos.", "#FBBF24")
             return True
         return False
 
@@ -1505,28 +1504,14 @@ class Extras:
             return
         alvos = [(juntar(self.fm_path, n), d) for n, d, _ in itens]
         nomes = [legivel(n.rsplit("/", 1)[-1]) for n, _, _ in itens]
-        if len(itens) == 1:
-            titulo = f"Apagar “{nomes[0]}”?"
-            aviso = ("A pasta e tudo que está dentro dela serão apagados do PS3. Isso não pode ser desfeito."
-                     if itens[0][1] else "O arquivo será apagado do PS3. Isso não pode ser desfeito.")
-            msg_ok = f"“{nomes[0]}” foi apagado."
-        else:
-            titulo = f"Apagar {len(itens)} itens?"
-            lista = ", ".join(nomes[:4]) + (f" e mais {len(nomes) - 4}" if len(nomes) > 4 else "")
-            pastas = sum(1 for it in itens if it[1])
-            aviso = (f"{lista}. " + ("As pastas serão apagadas com tudo que tem dentro. " if pastas else "")
-                     + "Isso não pode ser desfeito.")
-            msg_ok = f"{len(itens)} itens apagados."
-        prog = {"n": 0}
+        msg_ok = f"“{nomes[0]}” foi apagado." if len(itens) == 1 else f"{len(itens)} itens apagados."
 
         def trabalho(ftp):
             for k, (caminho, eh_pasta) in enumerate(alvos, 1):
                 if len(alvos) > 1:
                     self.fila.put(("cb", lambda k=k: self.fm_status(f"Apagando… {k} de {len(alvos)}")))
                 apagar_remoto(ftp, caminho, eh_pasta)
-                prog["n"] = k
-        self.dialogo(titulo, aviso, "Apagar", perigo=True,
-                     acao=lambda: self._fm_operacao("Apagando…", trabalho, msg_ok))
+        self._fm_operacao("Apagando…", trabalho, msg_ok)      # direto, sem caixa de confirmação
 
     def fm_baixar(self):
         itens = self.fm_marcados_itens()
@@ -2170,6 +2155,7 @@ class Controles:
         status = ctk.CTkLabel(j, text="", font=f_txt, text_color=CINZA, anchor="w", wraplength=550,
                               justify="left")
         status.pack(fill="x", padx=26)
+        self._rc_lbl = status
         rod = ctk.CTkFrame(j, fg_color="transparent")
         rod.pack(fill="x", padx=24, pady=(6, 18))
         btn_reg = self._cn_btn(rod, "Registrar no PS3", lambda: registrar(), "azul", 150, 38)
@@ -2296,13 +2282,15 @@ class Controles:
                 msg, cor = "XPAD reativado. Espere a mensagem no PS3 e conecte o controle.", "#34D399"
             except Exception as e:
                 msg, cor = f"Não consegui reativar ({str(e)[:50]})", "#F87171"
-            self.fila.put(("cb", lambda: self.dialogo("Reativar XPAD", msg, cancelar=False)
-                           if cor == "#F87171" else self._rc_status(msg)))
+            self.fila.put(("cb", lambda: self._rc_status(msg, cor)))
         threading.Thread(target=tarefa, daemon=True).start()
 
-    def _rc_status(self, msg):
-        self.dialogo("XPAD reativado", msg, cancelar=False)
-        if self._cn_ativo():
+    def _rc_status(self, msg, cor="#34D399"):
+        lbl = getattr(self, "_rc_lbl", None)
+        if lbl is not None and lbl.winfo_exists():
+            lbl.configure(text=msg, text_color=cor)
+        self.cn_msg(msg, cor)
+        if self._cn_ativo() and cor != "#F87171":
             self.carregar_console()
 
 
@@ -2633,8 +2621,11 @@ class Console:
         else:
             txt = (f"{versao or 'XPAD Revolution'} foi instalado.{extra} Não consegui ativá-lo agora; "
                    "use o botão Ativar na lista de plugins.")
-        self.dialogo("Suporte a controles", txt, cancelar=False)
         self.carregar_console()
+        if self._cn_ativo():
+            self.cn_xpad_status.configure(text="✓ Instalado" + (" e ativo agora" if ativo else ""),
+                                          text_color="#34D399")
+            self.root.after(900, lambda: self.cn_msg(txt[:150], "#34D399" if ativo else "#FBBF24"))
 
     def _xpad_erro(self, msg):
         if self._cn_ativo():
@@ -2659,30 +2650,28 @@ class Console:
 
     # ---- energia
     def energia(self, acao):
-        if acao == "restart":
-            self.dialogo("Reiniciar o PS3?", "O console vai reiniciar. Depois é preciso ativar o HEN de novo.",
-                         "Reiniciar", lambda: self._energia_enviar("restart"))
-        else:
-            self.dialogo("Desligar o PS3?", "O console vai desligar. Para ligar de novo, use o botão do console "
-                         "ou do controle.", "Desligar", lambda: self._energia_enviar("shutdown"), perigo=True)
+        """Reinicia ou desliga na hora, sem perguntar."""
+        self._energia_enviar(acao)
 
     def _energia_enviar(self, acao):
         ip = self.cfg.get("ip")
+        self.cn_msg("Reiniciando o PS3…" if acao == "restart" else "Desligando o PS3…", "#FBBF24")
 
         def trabalho():
             try:
                 comando_energia(ip, acao)
                 self.fila.put(("cb", lambda: self._energia_ok(acao)))
             except Exception as e:
-                self.fila.put(("cb", lambda e=e: self.dialogo(
-                    "Não deu certo", f"O webMAN não respondeu ao comando ({str(e)[:80]}).", cancelar=False)))
+                self.fila.put(("cb", lambda e=e: self.cn_msg(
+                    f"O webMAN não respondeu ao comando ({str(e)[:60]}).", "#F87171")))
         threading.Thread(target=trabalho, daemon=True).start()
 
     def _energia_ok(self, acao):
         self.cn_sessao = {}
         self.atualizar_status("erro" if acao == "shutdown" else "busca")
         if self._cn_ativo():
-            self.cn_msg("Reiniciando o PS3…" if acao == "restart" else "PS3 desligando…", "#FBBF24")
+            self.cn_msg("Reiniciando o PS3… depois é só ativar o HEN de novo." if acao == "restart"
+                        else "PS3 desligando…", "#FBBF24")
             self._cn_botoes()
         if acao == "restart":
             self.root.after(45000, self.buscar_ps3)
@@ -4803,7 +4792,8 @@ class App(Extras, Console, Controles, Tela, Conversor):
         j = ctk.CTkToplevel(self.root)
         self._janela_cfg = j
         j.title("Configurações")
-        j.geometry("420x670")
+        f_ = self.p.s / self.escala_base
+        j.geometry(f"{int(420 * f_)}x{int(670 * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
