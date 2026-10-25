@@ -1454,7 +1454,17 @@ def _carregar_no_slot(ip, caminho, slot):
     (/loadprx.ps3) e, se o console recusar, o painel do PS3MAPI."""
     prx = _url_caminho(caminho)
     try:
-        http_webman(ip, f"loadprx.ps3?slot={slot}&prx={prx}")
+        http_webman(ip, f"loadprx.ps3?slot={slot}&prx={prx}", timeout=20)
+    except (socket.timeout, TimeoutError, urllib.error.URLError) as e:
+        if isinstance(e, urllib.error.HTTPError):
+            raise
+        if isinstance(e, urllib.error.URLError) and not isinstance(e.reason, (socket.timeout, TimeoutError)):
+            raise
+        # o webMAN só responde depois que o plugin termina de iniciar, e alguns (como o XPAD) demoram:
+        # em vez de dar erro, confere se ele já está carregado
+        if _esperar_plugin(ip, caminho, 25) is False:
+            raise RuntimeError("O PS3 não respondeu a tempo e o plugin não apareceu como ativo. "
+                               "Espere uns segundos e clique em ⟳ Atualizar para conferir.") from None
     except urllib.error.HTTPError as e:
         if e.code not in (400, 404, 501):
             raise
@@ -1463,6 +1473,20 @@ def _carregar_no_slot(ip, caminho, slot):
         except urllib.error.HTTPError:
             raise RuntimeError("O webMAN MOD do seu PS3 não aceitou o comando para carregar plugins. "
                                "Atualize o webMAN MOD e tente de novo.") from None
+
+
+def _esperar_plugin(ip, caminho, segundos):
+    """Fica perguntando ao PS3 se o plugin já está carregado.
+    True = está; False = o PS3 respondeu e ele não está; None = o PS3 não respondeu nada."""
+    fim, respondeu = time.time() + segundos, False
+    while time.time() < fim:
+        ativos = plugins_ativos(ip)      # None enquanto o webMAN ainda está ocupado
+        if ativos is not None:
+            respondeu = True
+            if caminho in ativos:
+                return True
+        time.sleep(2)
+    return False if respondeu else None
 
 
 def ativar_plugin(ip, caminho, ocupados):
@@ -2179,7 +2203,8 @@ class Console:
         ocupados = self.cn_dados["ativos"] if self.cn_dados else None
         self.op_ativa = True
         self._cn_botoes()
-        self.cn_msg(("Ativando " if ligar else "Desativando ") + nome + "…")
+        self.cn_msg(("Ativando " + nome + "… alguns plugins levam até meio minuto") if ligar
+                    else ("Desativando " + nome + "…"))
         if not hasattr(self, "cn_sessao"):
             self.cn_sessao = {}
 
