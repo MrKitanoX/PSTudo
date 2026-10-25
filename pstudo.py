@@ -24,6 +24,8 @@ import sys
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import filedialog
 
@@ -1409,7 +1411,6 @@ SLOTS_VSH = range(0, 7)
 
 def http_webman(ip, caminho, timeout=6):
     """Chama um comando web do webMAN MOD e devolve o texto da resposta."""
-    import urllib.request
     with urllib.request.urlopen(f"http://{ip}/{caminho}", timeout=timeout) as r:
         return r.read(64 * 1024).decode("latin-1", "ignore")
 
@@ -1448,23 +1449,42 @@ def plugins_ativos(ip):
     return ativos if respondeu else None
 
 
+def _carregar_no_slot(ip, caminho, slot):
+    """Carrega o .sprx num slot. Usa o comando que existe em todas as versões do webMAN MOD
+    (/loadprx.ps3) e, se o console recusar, o painel do PS3MAPI."""
+    prx = _url_caminho(caminho)
+    try:
+        http_webman(ip, f"loadprx.ps3?slot={slot}&prx={prx}")
+    except urllib.error.HTTPError as e:
+        if e.code not in (400, 404, 501):
+            raise
+        try:
+            http_webman(ip, f"vshplugin.ps3mapi?load_slot={slot}&prx={prx}")
+        except urllib.error.HTTPError:
+            raise RuntimeError("O webMAN MOD do seu PS3 não aceitou o comando para carregar plugins. "
+                               "Atualize o webMAN MOD e tente de novo.") from None
+
+
 def ativar_plugin(ip, caminho, ocupados):
     """Carrega o plugin só nesta sessão (some ao reiniciar). Não mexe no boot_plugins.txt."""
     livres = [s for s in range(6, 0, -1) if s not in set((ocupados or {}).values())]
-    if ocupados is not None and livres:
-        http_webman(ip, f"loadprx_ps3?slot={livres[0]}&prx={_url_caminho(caminho)}")
-        return livres[0]
     if ocupados is not None and not livres:
         raise RuntimeError("Todos os espaços de plugin do PS3 estão ocupados. Desative algum antes.")
-    http_webman(ip, f"loadprx_ps3/{_url_caminho(caminho).lstrip('/')}")
-    return None
+    slot = livres[0] if ocupados is not None else 6
+    _carregar_no_slot(ip, caminho, slot)
+    return slot
 
 
 def desativar_plugin(ip, caminho, slot):
-    if slot is not None:
-        http_webman(ip, f"unloadprx.ps3?slot={slot}")
-    else:
-        http_webman(ip, f"unloadprx.ps3/{_url_caminho(caminho).lstrip('/')}")
+    try:
+        if slot is not None:
+            http_webman(ip, f"unloadprx.ps3?slot={slot}")
+        else:
+            http_webman(ip, f"unloadprx.ps3{_url_caminho(caminho)}")      # /unloadprx.ps3/dev_hdd0/...
+    except urllib.error.HTTPError as e:
+        if e.code not in (400, 404, 501) or slot is None:
+            raise
+        http_webman(ip, f"vshplugin.ps3mapi?unload_slot={slot}")
 
 
 def trava_plugin(caminho):
