@@ -2344,12 +2344,31 @@ def devices_detalhes(texto):
     return lista
 
 
+XPAD_LOG = XPAD_DIR + "/xpad.log"
+
+
+def estado_log_xpad(texto):
+    """Do xpad.log do último boot: ({(vid, pid)} registrados no PS3, houve falta de espaço?)."""
+    import re
+    reg = {(int(a, 16), int(b, 16)) for a, b in re.findall(r"\]\s*registered ([0-9A-Fa-f]{4}):([0-9A-Fa-f]{4})", texto)}
+    cheio = "LDD table full" in texto
+    return reg, cheio
+
+
 def ler_devices_remoto(ftp):
     try:
         texto, _ = ler_texto_remoto(ftp, XPAD_DEVICES)
     except ftplib.error_perm:
         return []
-    return devices_detalhes(texto)
+    lista = devices_detalhes(texto)
+    try:
+        log, _ = ler_texto_remoto(ftp, XPAD_LOG)
+        reg, cheio = estado_log_xpad(log)
+        for d in lista:            # None = sem informação; True = carregou no último boot; False = ficou de fora
+            d["carregado"] = True if (d["vid"], d["pid"]) in reg else (False if cheio else None)
+    except ftplib.all_errors:
+        pass
+    return lista
 
 
 def remover_devices(ftp, chaves):
@@ -2455,6 +2474,16 @@ class Controles:
                 ctk.CTkLabel(esq, text=d["nome"], font=f_nome, text_color=BRANCO, anchor="w").pack(anchor="w")
                 ctk.CTkLabel(esq, text=f"{d['vid']:04X}:{d['pid']:04X}  •  {TIPOS_PAD.get(d['tipo'], d['tipo'])}",
                              font=f_txt, text_color=CINZA_ESCURO, anchor="w").pack(anchor="w")
+                if d.get("carregado") is not None:
+                    ctk.CTkLabel(esq, text="✓ carregado no último boot" if d["carregado"] else
+                                 "✗ não carregou: o PS3 ficou sem espaço (limite do XPAD)", font=f_txt,
+                                 text_color="#34D399" if d["carregado"] else "#FBBF24", anchor="w").pack(anchor="w")
+            if any(d.get("carregado") is False for d in regs):
+                ctk.CTkLabel(lista_reg, text="O XPAD carrega a lista dele primeiro e o PS3 só tem uns 22 espaços, "
+                                             "então controles registrados aqui podem ficar de fora. Use um modo do "
+                                             "controle que o XPAD já conhece (ex.: DualShock 4, luz azul nos GameSir).",
+                             font=f_txt, text_color=CINZA, wraplength=360, justify="left").pack(anchor="w", padx=8,
+                                                                                               pady=(8, 4))
 
         def mostrar_disponiveis():
             for w_ in lista_disp.winfo_children():

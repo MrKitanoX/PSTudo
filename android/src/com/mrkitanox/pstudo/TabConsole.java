@@ -492,6 +492,8 @@ public class TabConsole {
 
     // ------------------------------------------------------------------ controles (registrados x disponíveis)
     private List<Xpad.Controle> registrados = null;
+    private java.util.Set<String> carregados = null;     // "vid:pid" que o XPAD registrou no último boot (xpad.log)
+    private boolean logCheio = false;
 
     private View telaControles() {
         ScrollView sv = new ScrollView(a);
@@ -552,9 +554,14 @@ public class TabConsole {
             InputDevice d = InputDevice.getDevice(id);
             if (d == null || d.isVirtual()) continue;
             int s = d.getSources();
-            boolean pad = (s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-                    || (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
-            if (!pad || d.getVendorId() == 0) continue;
+            // só controles de verdade: precisa ter analógico (joystick). Sensores de digital, botões do
+            // aparelho etc. às vezes se dizem "gamepad" (ex.: uinput-goodix) e não podem entrar na lista.
+            boolean joystick = (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                    && d.getMotionRange(android.view.MotionEvent.AXIS_X) != null;
+            String nm = String.valueOf(d.getName()).toLowerCase(Locale.ROOT);
+            boolean interno = nm.startsWith("uinput") || nm.contains("fingerprint") || nm.contains("goodix")
+                    || nm.contains("fpc") || nm.contains("gpio") || nm.contains("pwrkey") || nm.contains("touch");
+            if (!joystick || interno || d.getVendorId() == 0) continue;
             String k = d.getVendorId() + ":" + d.getProductId();
             if (!vistos.add(k)) continue;
             l.add(new Object[]{d.getVendorId(), d.getProductId(), d.getName()});
@@ -573,11 +580,20 @@ public class TabConsole {
                 public void run() {
                     Ftp f = null;
                     List<Xpad.Controle> l = new ArrayList<Xpad.Controle>();
-                    try { f = a.conectar(); l = Xpad.registrados(f.lerTextoOuVazio(Xpad.DEVICES)); }
+                    java.util.Set<String> carr = null;
+                    boolean cheio = false;
+                    try {
+                        f = a.conectar();
+                        l = Xpad.registrados(f.lerTextoOuVazio(Xpad.DEVICES));
+                        String log = f.lerTextoOuVazio(Xpad.DIR + "/xpad.log");
+                        if (!log.isEmpty()) { carr = Xpad.carregadosNoLog(log); cheio = log.contains("LDD table full"); }
+                    }
                     catch (IOException ignored) { }
                     finally { if (f != null) f.fechar(); }
                     final List<Xpad.Controle> fl = l;
-                    a.ui(new Runnable() { public void run() { registrados = fl; preencherControles(esq, dir, status); } });
+                    final java.util.Set<String> fc = carr;
+                    final boolean fch = cheio;
+                    a.ui(new Runnable() { public void run() { registrados = fl; carregados = fc; logCheio = fch; preencherControles(esq, dir, status); } });
                 }
             });
             return;
@@ -586,6 +602,7 @@ public class TabConsole {
         esq.addView(cont);
         if (registrados.isEmpty()) esq.addView(Ui.texto(a, "Nenhum controle registrado ainda.", 12, Ui.CINZA, Ui.NORMAL));
         java.util.Set<String> ja = new java.util.HashSet<String>();
+        boolean algumFora = false;
         for (final Xpad.Controle r : registrados) {
             ja.add(r.chave());
             LinearLayout l = Ui.linha(a);
@@ -594,6 +611,12 @@ public class TabConsole {
             LinearLayout t = Ui.coluna(a);
             t.addView(Ui.texto(a, r.nome, 13, Ui.BRANCO, Ui.FORTE));
             t.addView(Ui.texto(a, String.format(Locale.ROOT, "%04X:%04X  •  %s", r.vid, r.pid, Xpad.nomeTipo(r.tipo)), 11, Ui.CINZA_ESCURO, Ui.NORMAL));
+            if (carregados != null) {
+                boolean ok = carregados.contains(r.chave());
+                if (ok || logCheio) t.addView(Ui.texto(a, ok ? "✓ carregado no último boot"
+                        : "✗ não carregou: o PS3 ficou sem espaço (limite do XPAD)", 11, ok ? Ui.VERDE : Ui.AMARELO, Ui.NORMAL));
+                if (!ok && logCheio) algumFora = true;
+            }
             l.addView(t, Ui.lpPeso(1));
             TextView b = Ui.botao(a, "Remover", "perigo", new View.OnClickListener() {
                 public void onClick(View v) {
@@ -616,6 +639,10 @@ public class TabConsole {
             esq.addView(l, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 6, 0, 0));
         }
 
+        if (algumFora) esq.addView(Ui.texto(a, "O XPAD carrega a lista dele primeiro e o PS3 só tem uns 22 espaços, então "
+                + "controles registrados aqui podem ficar de fora. Use um modo do controle que o XPAD já conhece "
+                + "(ex.: DualShock 4, luz azul nos GameSir).", 11, Ui.CINZA, Ui.NORMAL),
+                Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
         final List<Object[]> marcados = new ArrayList<Object[]>();
         int novos = 0;
         for (final Object[] d : controlesDoCelular()) {

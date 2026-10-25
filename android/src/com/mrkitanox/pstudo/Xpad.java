@@ -299,6 +299,14 @@ public final class Xpad {
         }
     }
 
+    /** "vid:pid" (decimal, como Controle.chave) que o XPAD conseguiu registrar no último boot, pelo xpad.log. */
+    public static Set<String> carregadosNoLog(String log) {
+        Set<String> s = new HashSet<String>();
+        Matcher m = Pattern.compile("\\]\\s*registered ([0-9A-Fa-f]{4}):([0-9A-Fa-f]{4})").matcher(log);
+        while (m.find()) s.add(Integer.parseInt(m.group(1), 16) + ":" + Integer.parseInt(m.group(2), 16));
+        return s;
+    }
+
     public static List<Controle> registrados(String texto) {
         List<Controle> l = new ArrayList<Controle>();
         Set<String> vistos = new HashSet<String>();
