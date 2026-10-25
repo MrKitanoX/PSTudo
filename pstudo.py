@@ -1896,15 +1896,38 @@ def ativar_plugin(ip, caminho, ocupados):
 
 
 def desativar_plugin(ip, caminho, slot):
+    """Tira o plugin da memória. Alguns (como o XPAD) demoram para sair e o webMAN só responde
+    depois, ou nem responde: o pedido conta como enviado e o app confere se ele saiu mesmo."""
+    def pedir(cmd):
+        try:
+            http_webman(ip, cmd, timeout=10)
+        except urllib.error.HTTPError:
+            raise
+        except (socket.timeout, TimeoutError, ConnectionError):
+            pass
+        except urllib.error.URLError as e:
+            if not isinstance(e.reason, (socket.timeout, TimeoutError, ConnectionError)):
+                raise
+        except Exception:        # resposta cortada no meio (http.client)
+            pass
+
     try:
         if slot is not None:
-            http_webman(ip, f"unloadprx.ps3?slot={slot}")
+            pedir(f"unloadprx.ps3?slot={slot}")
         else:
-            http_webman(ip, f"unloadprx.ps3{_url_caminho(caminho)}")      # /unloadprx.ps3/dev_hdd0/...
+            pedir(f"unloadprx.ps3{_url_caminho(caminho)}")      # /unloadprx.ps3/dev_hdd0/...
     except urllib.error.HTTPError as e:
         if e.code not in (400, 404, 501) or slot is None:
             raise
-        http_webman(ip, f"vshplugin.ps3mapi?unload_slot={slot}")
+        pedir(f"vshplugin.ps3mapi?unload_slot={slot}")
+    fim, ativos = time.time() + 15, None
+    while time.time() < fim:
+        ativos = plugins_ativos(ip)
+        if ativos is not None and caminho not in ativos:
+            return
+        time.sleep(1.5)
+    if ativos is not None and caminho in ativos:
+        raise RuntimeError("O PS3 não tirou o plugin da memória. Reinicie o PS3 para desligá-lo de vez.")
 
 
 def trava_plugin(caminho):

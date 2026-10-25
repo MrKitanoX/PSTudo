@@ -142,13 +142,24 @@ public final class WebMan {
         return slot;
     }
 
+    /** Tira o plugin da memória. Alguns (como o XPAD) demoram para sair e o webMAN só responde depois,
+        ou nem responde: o pedido conta como enviado e aqui se confere se ele saiu mesmo. */
     public static void desativar(String ip, String caminho, Integer slot) throws IOException {
         try {
-            if (slot != null) http(ip, "unloadprx.ps3?slot=" + slot, 8000);
-            else http(ip, "unloadprx.ps3" + url(caminho), 8000);
+            if (slot != null) pedirTolerante(ip, "unloadprx.ps3?slot=" + slot, 10000);
+            else pedirTolerante(ip, "unloadprx.ps3" + url(caminho), 10000);
         } catch (ErroHttp e) {
             if (slot == null || (e.codigo != 400 && e.codigo != 404 && e.codigo != 501)) throw e;
-            http(ip, "vshplugin.ps3mapi?unload_slot=" + slot, 8000);
+            pedirTolerante(ip, "vshplugin.ps3mapi?unload_slot=" + slot, 10000);
         }
+        long fim = System.currentTimeMillis() + 15000;
+        Map<String, Integer> at = null;
+        while (System.currentTimeMillis() < fim) {
+            at = pluginsAtivos(ip);
+            if (at != null && !at.containsKey(caminho)) return;
+            try { Thread.sleep(1500); } catch (InterruptedException e) { break; }
+        }
+        if (at != null && at.containsKey(caminho))
+            throw new IOException("o PS3 não tirou o plugin da memória. Reinicie o PS3 para desligá-lo de vez.");
     }
 }

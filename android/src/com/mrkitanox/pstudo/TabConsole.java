@@ -317,13 +317,27 @@ public class TabConsole {
 
     // ------------------------------------------------------------------ ações
     interface Acao { String fazer() throws IOException; }
+    private int geracao = 0;
 
     private void rodar(String descricao, final Acao ac, final boolean recarregar) {
         if (ocupado) return;
         ocupado = true;
+        final int g = ++geracao;
         botoes();
         desenharPlugins();
         msg(descricao, Ui.CINZA);
+        // se o PS3 travar no meio, os botões não podem ficar cinza para sempre
+        a.h.postDelayed(new Runnable() {
+            public void run() {
+                if (!ocupado || geracao != g) return;
+                ocupado = false;
+                if (ativa()) {
+                    msg("O PS3 está demorando para responder. Toque em ⟳ Atualizar para conferir.", Ui.AMARELO);
+                    botoes();
+                    desenharPlugins();
+                }
+            }
+        }, 75000);
         a.bg(new Runnable() {
             public void run() {
                 String m;
@@ -334,11 +348,15 @@ public class TabConsole {
                 } catch (IOException e) {
                     m = "Não deu certo: " + e.getMessage();
                     ok = false;
+                } catch (Throwable e) {          // qualquer outro erro também libera os botões
+                    m = "Não deu certo: " + e;
+                    ok = false;
                 }
                 final String fm = m;
                 final boolean fok = ok;
                 a.ui(new Runnable() {
                     public void run() {
+                        if (geracao != g) return;    // já começou outra ação depois desta
                         ocupado = false;
                         if (fok && recarregar) { msgPendente = fm; carregar(); }
                         if (ativa()) { msg(fm, fok ? Ui.VERDE : Ui.VERMELHO); botoes(); desenharPlugins(); }
