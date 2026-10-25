@@ -23,10 +23,10 @@
 |---|---|
 | **Enviar jogos** | Envia jogos em pasta (BLUS, BLES…), ISOs e PKGs pela rede. Encontra o PS3 sozinho, mostra o nome real do jogo, escolhe a pasta certa (GAMES, PS3ISO, packages) e não reenvia o que já está no console. Dá para usar as outras abas durante o envio, e um som avisa quando termina. |
 | **Converter para ISO** | Transforma jogos em pasta em ISO (com o `makeps3iso`) e, de forma experimental, PKGs de jogos de disco em ISO. |
-| **Arquivos** | Gerenciador de arquivos do PS3: navegar, enviar, baixar, renomear, criar pastas, apagar (com confirmação) e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
+| **Arquivos** | Gerenciador de arquivos do PS3: navegar, pesquisar (na pasta ou também nas subpastas), enviar, baixar, renomear, criar pastas, apagar (com confirmação) e editar arquivos de texto, como o `boot_plugins.txt`. As pastas do sistema ficam protegidas. |
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution), ajustar o analógico e registrar os controles ligados no PC no `xpad_devices.txt`. |
-| **Tela** | Espelha a placa de captura com áudio. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** em 60, 120, 144 ou 210 Hz. |
+| **Tela** | Espelha a placa de captura com áudio. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** em 60, 120, 144 ou 210 Hz, sem travar quando você transmite no Discord ou no OBS. |
 
 <p align="center">
   <img src="docs/imagens/enviando.png" width="400" alt="Enviando jogos">
@@ -57,6 +57,7 @@ Se o PS3 não for encontrado, clique no ⚙ e digite o IP do console.
 | `F11` | App em tela cheia |
 | `F` | Liga e desliga o FSR (na tela cheia da aba Tela) |
 | `I` | Troca a interpolação de quadros (na tela cheia da aba Tela) |
+| `Ctrl` + `Shift` + `F` / `I` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
 | `Esc` | Sai da tela cheia |
 
 ## Rodar pelo código ou gerar o .exe
@@ -77,11 +78,14 @@ Para gerar o `PSTudo.exe`, rode o `build.bat`. O arquivo sai na pasta `dist`.
 **A aba Tela diz que não conseguiu abrir a placa.**
 A placa de captura só funciona com um programa por vez. Feche o OBS ou qualquer outro programa que esteja usando a placa.
 
+**A transmissão no Discord trava quando a tela cheia está em foco.**
+Deixe ligada a opção **Compatível com Discord e OBS** (aba Tela → Imagem). Ela já vem ligada. Para trocar o FSR ou a interpolação sem tirar o foco do Discord, use `Ctrl` + `Shift` + a tecla do atalho.
+
 **Posso transformar qualquer PKG em ISO?**
 Não. Só jogos de disco que foram empacotados em PKG. Jogos da PSN (IDs que começam com `NP`) não têm versão de disco, e atualizações não são o jogo completo. Nesses casos, instale o PKG pelo PS3.
 
 **O que a interpolação faz?**
-Cria quadros intermediários a partir do movimento da imagem, deixando tudo mais fluido. Ela acrescenta um pouco de atraso (cerca de 1 quadro do jogo), então para jogos competitivos é melhor deixá-la desligada.
+Cria quadros intermediários a partir do movimento da imagem, deixando tudo mais fluido. Ela acrescenta um pouco de atraso (cerca de 1 quadro do jogo), então para jogos competitivos é melhor deixá-la desligada. Onde o movimento não dá para acompanhar (objeto aparecendo, explosão), o PSTudo mostra o quadro real em vez de misturar dois quadros, para não criar imagem dupla. O HUD e os textos parados ficam no lugar.
 
 ## Créditos
 
