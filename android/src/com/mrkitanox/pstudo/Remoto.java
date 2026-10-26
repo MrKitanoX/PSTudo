@@ -87,6 +87,9 @@ public class Remoto {
     }
 
     private void loop() {
+        // começa do zero: o controle virtual é criado de novo no primeiro botão e pega o primeiro
+        // espaço livre (jogador 1 se não houver outro controle ligado no PS3)
+        try { pedir("pad.ps3?off"); } catch (Exception ignored) { }
         while (true) {
             String cmd;
             synchronized (trava) {

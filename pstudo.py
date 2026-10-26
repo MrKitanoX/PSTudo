@@ -5774,6 +5774,12 @@ class EnviadorPad:
                     raise
 
     def _loop(self):
+        # começa do zero: o controle virtual é criado de novo no primeiro botão e pega o primeiro
+        # espaço livre (jogador 1 se não houver outro controle ligado no PS3)
+        try:
+            self._pedir("pad.ps3?off")
+        except Exception:
+            pass
         while True:
             with self.cond:
                 while self.vivo and self.pendente is None:

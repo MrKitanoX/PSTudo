@@ -71,8 +71,8 @@ public class TabControle {
         if (lblMsg == null) return;
         if (!a.conectado()) { lblMsg.setText("Conecte o PS3 para usar o controle remoto."); lblMsg.setTextColor(Ui.AMARELO); return; }
         lblMsg.setTextColor(Ui.CINZA);
-        lblMsg.setText(ligado() ? "Funciona no XMB e nos jogos. Também aceita um controle Bluetooth ligado no celular. "
-                + "O analógico vai inclinado até o fim (8 direções)."
+        lblMsg.setText(ligado() ? "Para jogos: desligue os outros controles do PS3 antes de ligar aqui (senão este vira o jogador 2). "
+                + "Também aceita um controle Bluetooth ligado no celular. O analógico vai inclinado até o fim."
                 : "Ligue para controlar o PS3 por aqui.");
     }
 
