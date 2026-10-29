@@ -6229,13 +6229,19 @@ class TropUsr:
     def info(self, i):
         o = self.tempos[i]
         _seq, dest, sync, _u, t1 = struct.unpack_from(">IIIIQ", self.d, o)
-        return {"id": i, "tipo": self.tipo(i), "destravado": dest == 1, "sync": bool(sync & TROP_SYNC), "tempo": t1}
+        return {"id": i, "tipo": self.tipo(i), "destravado": dest != 0, "sync": bool(sync & TROP_SYNC), "tempo": t1}
+
+    def maior_tempo(self):
+        ts = [struct.unpack_from(">Q", self.d, o + 16)[0] for o in self.tempos]
+        ts += [struct.unpack_from(">Q", self.d, self.lista + k)[0] for k in (16, 32, 64)]
+        return max(ts + [0])
 
     def destravar(self, i, t):
         d, o = self.d, self.tempos[i]
-        if struct.unpack_from(">I", d, o + 4)[0] == 1:
+        if struct.unpack_from(">I", d, o + 4)[0] != 0:
             return False
-        struct.pack_into(">IIIQQ", d, o + 4, 1, TROP_NAO_SYNC, 0, t, t)
+        struct.pack_into(">II", d, o + 4, 1, TROP_NAO_SYNC)
+        struct.pack_into(">QQ", d, o + 16, t, t)
         n = struct.unpack_from(">I", d, self.lista + 112)[0]
         struct.pack_into(">I", d, self.lista + 112, n + 1)
         n7 = struct.unpack_from(">I", d, self.r7)[0]
@@ -6266,6 +6272,7 @@ class TropTrns:
         depois = [o for o, _t, _u in regs.values() if o > ofs4]
         fim = min(depois) if depois else len(d)       # não invade a parte seguinte do arquivo
         self.capacidade = (fim - ofs4) // self.passo - 1
+        self.tipo_bloco = struct.unpack_from(">I", d, ofs4)[0]
         self.contagem = struct.unpack_from(">I", d, self.b3 + 20)[0]     # ganhos + 1
         if not 1 <= self.contagem <= self.capacidade + 1:
             raise ErroTrofeu("contagem estranha no TROPTRNS.DAT")
@@ -6280,15 +6287,41 @@ class TropTrns:
             r.append({"id": tid, "tipo": tp, "sync": sync != 0, "tempo": t})
         return r
 
-    def destravar(self, i, tipo, t):
-        if any(g["id"] == i for g in self.ganhos()):
-            return False
-        k = self.contagem
+    def maior_tempo(self):
+        return max([g["tempo"] for g in self.ganhos()] + [0])
+
+    def conferir_formato(self, total):
+        """Confere se o arquivo está no formato esperado (ganhos + 1 na contagem, próximo espaço vazio).
+        Se não estiver, é melhor não mexer: um formato diferente faria a gravação apagar um troféu."""
+        for k in range(1, self.contagem):
+            cab = self.ini + k * self.passo
+            o = cab + 16
+            tipo_b, tam = struct.unpack_from(">II", self.d, cab)
+            exist = struct.unpack_from(">I", self.d, o + 4)[0]
+            tid = struct.unpack_from(">I", self.d, o + 32)[0]
+            if tipo_b != self.tipo_bloco or tam != self.passo - 16 or exist == 0 or tid >= total:
+                raise ErroTrofeu("o TROPTRNS.DAT está num formato que o PSTudo não reconhece. Nada foi alterado.")
+        self._conferir_vazio(self.contagem)
+
+    def _conferir_vazio(self, k):
         if k > self.capacidade:
             raise ErroTrofeu("não há espaço no TROPTRNS.DAT")
+        cab = self.ini + k * self.passo
+        tipo_b, tam = struct.unpack_from(">II", self.d, cab)
+        o = cab + 16
+        exist, sync = struct.unpack_from(">II", self.d, o + 4)
+        tid, t1, t2 = struct.unpack_from(">I", self.d, o + 32)[0], *struct.unpack_from(">QQ", self.d, o + 48)
+        if tipo_b != self.tipo_bloco or tam != self.passo - 16 or exist or sync or tid or t1 or t2:
+            raise ErroTrofeu("o espaço livre do TROPTRNS.DAT não está vazio. Nada foi alterado.")
+
+    def destravar(self, i, tipo, t):
+        if any(g["id"] == i for g in self.ganhos()):
+            raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre este troféu. Nada foi alterado.")
+        k = self.contagem
+        self._conferir_vazio(k)
         o = self.ini + k * self.passo + 16
         struct.pack_into(">IIII", self.d, o, k, 2, 0, 0)
-        self.d[o + 16:o + 32] = b"\0" * 16
+        self.d[o + 16:o + self.passo - 16] = b"\0" * (self.passo - 32)
         struct.pack_into(">IIIIQQ", self.d, o + 32, i, tipo, 0x1000, 0, t, t)
         self.contagem += 1
         struct.pack_into(">I", self.d, self.b3 + 20, self.contagem)
@@ -6322,7 +6355,8 @@ def ler_sfm(dados):
         except ValueError:
             continue
         r[tid] = {"nome": (t.findtext("name") or "").strip(), "detalhe": (t.findtext("detail") or "").strip(),
-                  "ttype": t.get("ttype", ""), "oculto": t.get("hidden", "no") == "yes"}
+                  "ttype": t.get("ttype", ""), "oculto": t.get("hidden", "no") == "yes",
+                  "grupo": (t.get("gid") or "").strip()}
     return r, jogo
 
 
@@ -6340,23 +6374,35 @@ def destravar_trofeus(arquivos, ids, agora=None):
     trns = TropTrns(trns_plano)
     if usr.npcomm and trns.npcomm and usr.npcomm != trns.npcomm:
         raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT são de jogos diferentes.")
-    ganhos = trns.ganhos()
+    trns.conferir_formato(usr.total)
+    ganhos = {g["id"] for g in trns.ganhos()}
+    if ganhos != {i for i in range(usr.total) if usr.info(i)["destravado"]}:
+        raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre os troféus ganhos. Nada foi alterado.")
     t = tempo_ps3(agora)
-    ultimo = max([g["tempo"] for g in ganhos] + [0])
+    ultimo = max(trns.maior_tempo(), usr.maior_tempo())
     if t <= ultimo:
         t = ultimo + 1_000_000
+    # platina (tipo 1) só por último, e só se todos os troféus do jogo base ficarem ganhos
+    grupos = {}
+    if "TROPCONF.SFM" in arquivos:
+        grupos = {k: v.get("grupo", "") for k, v in ler_sfm(arquivos["TROPCONF.SFM"])[0].items()}
+    pedidos = [i for i in sorted(set(ids)) if 0 <= i < usr.total and not usr.info(i)["destravado"]]
+    platinas = [i for i in pedidos if usr.tipo(i) == 1]
+    outros = [i for i in pedidos if usr.tipo(i) != 1]
+    base = [i for i in range(usr.total) if usr.tipo(i) != 1 and grupos.get(i, "") in ("", "0", "000")]
+    vao_ficar = set(outros) | {i for i in range(usr.total) if usr.info(i)["destravado"]}
+    pulou_platina = bool(platinas) and not all(i in vao_ficar for i in base)
+    ordem = outros + ([] if pulou_platina else platinas)
     feitos = 0
-    for i in sorted(set(ids)):
-        if not 0 <= i < usr.total:
-            continue
-        if usr.info(i)["destravado"]:
-            continue
+    for i in ordem:
         usr.destravar(i, t)
         trns.destravar(i, usr.tipo(i), t)
         t += 1_000_000                       # um segundo entre cada um, na ordem
         feitos += 1
     if not feitos:
-        return {}, 0
+        if pulou_platina:
+            raise ErroTrofeu("A platina só pode ser destravada junto com (ou depois de) todos os troféus do jogo.")
+        return {}, 0, False
     novo_usr = bytes(usr.d)
     novo_trns = pfd.cifrar("TROPTRNS.DAT", bytes(trns.d))
     novo_trns = novo_trns + arquivos["TROPTRNS.DAT"][len(novo_trns):]   # mantém o tamanho do arquivo
@@ -6372,7 +6418,7 @@ def destravar_trofeus(arquivos, ids, agora=None):
     if TropTrns(p2.decifrar("TROPTRNS.DAT", novo_trns)).contagem != trns.contagem:
         raise ErroTrofeu("O TROPTRNS.DAT novo não conferiu. Nada foi alterado.")
     novos["PARAM.PFD"] = novo_pfd
-    return novos, feitos
+    return novos, feitos, pulou_platina
 
 
 def resumo_trofeus(arquivos):
@@ -6621,6 +6667,7 @@ class Trofeus:
         if st["sel"] and st["usuario"]:
             b = pasta_backup_trofeus(st["usuario"], st["sel"])
             tem_backup = os.path.isdir(b) and any(d.is_dir() and not d.name.endswith("_desfeito")
+                                                  and os.path.isdir(os.path.join(d.path, "depois"))
                                                   for d in os.scandir(b))
         self.tr_btn_restaurar.configure(state="normal" if livre and tem_backup else "disabled")
 
@@ -6823,7 +6870,7 @@ class Trofeus:
             return
         st["ocupado"] = True
         self._tr_botoes()
-        self._tr_msg("Fazendo backup e conferindo a assinatura dos troféus…")
+        self._tr_msg("Fazendo backup e conferindo a assinatura dos troféus… (deixe o PS3 no XMB, sem jogo aberto)")
 
         def trabalho(ftp):
             arqs = baixar_pasta_trofeu(ftp, jogo["pasta"])
@@ -6835,18 +6882,29 @@ class Trofeus:
             for nome, dados in arqs.items():                  # backup antes de tudo
                 with open(os.path.join(pasta, nome), "wb") as f:
                     f.write(dados)
-            novos, n = destravar_trofeus(arqs, ids)
+            novos, n, pulou = destravar_trofeus(arqs, ids)
             if not n:
-                return 0
+                return 0, False
             self.fila.put(("cb", lambda: self._tr_msg("Gravando no PS3…")))
-            gravar_trofeus_ps3(ftp, jogo["pasta"], novos, arqs)
-            return n
+            try:
+                gravar_trofeus_ps3(ftp, jogo["pasta"], novos, arqs)
+            except Exception as e:
+                raise ErroTrofeu(f"{e}. O PSTudo voltou os arquivos originais; a cópia de segurança "
+                                 "está em Backups.") from None
+            depois = os.path.join(pasta, "depois")         # como ficou: o Desfazer confere antes de voltar
+            os.makedirs(depois, exist_ok=True)
+            for nome, dados in novos.items():
+                with open(os.path.join(depois, nome), "wb") as f:
+                    f.write(dados)
+            return n, pulou
 
-        def ok(n):
+        def ok(r):
+            n, pulou = r
             st["marcados"] = set()
             if n:
+                extra = " A platina ficou de fora: ela só vem com todos os troféus do jogo." if pulou else ""
                 self._tr_msg(f"✓ {n} troféu(s) destravado(s). Reinicie o PS3 para aparecerem. "
-                             "Não sincronize com a PSN.", "#34D399")
+                             f"Não sincronize com a PSN.{extra}", "#34D399")
             else:
                 self._tr_msg("Esses troféus já estavam destravados.", CINZA)
             self.tr_escolher(cod, recarregar=True)
@@ -6867,8 +6925,8 @@ class Trofeus:
         base = pasta_backup_trofeus(u, cod) if u and cod else None
         if st["ocupado"] or not jogo or not base or not os.path.isdir(base):
             return
-        backups = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))
-                         and not d.endswith("_desfeito"))
+        backups = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d, "depois"))
+                         and not d.endswith("_desfeito"))      # só o que o PSTudo gravou de fato
         if not backups:
             return
         escolhido = os.path.join(base, backups[-1])    # o mais recente = como estava antes do último destravar
@@ -6882,6 +6940,12 @@ class Trofeus:
                 with open(os.path.join(escolhido, nome), "rb") as f:
                     antes[nome] = f.read()
             atuais = {n: ler_bytes_remoto(ftp, f"{jogo['pasta']}/{n}") for n in ARQS_TROFEU_MUDAM}
+            depois = os.path.join(escolhido, "depois")
+            for nome in ARQS_TROFEU_MUDAM:
+                with open(os.path.join(depois, nome), "rb") as f:
+                    if f.read() != atuais[nome]:
+                        raise ErroTrofeu("os troféus mudaram no PS3 depois que o PSTudo destravou (você ganhou "
+                                         "algum jogando?). Desfazer agora apagaria isso, então não mexi.")
             gravar_trofeus_ps3(ftp, jogo["pasta"], antes, atuais)
             os.rename(escolhido, escolhido + "_desfeito")     # o próximo "Desfazer" volta mais um passo
             return backups[-1]

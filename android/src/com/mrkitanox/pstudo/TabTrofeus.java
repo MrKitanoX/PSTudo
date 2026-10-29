@@ -265,7 +265,8 @@ public class TabTrofeus {
         File[] l = pastaBackup().listFiles();
         if (l == null) return null;
         List<File> ok = new ArrayList<File>();
-        for (File f : l) if (f.isDirectory() && !f.getName().endsWith("_desfeito")) ok.add(f);
+        for (File f : l)      // só o que o PSTudo gravou de fato (tem a pasta "depois")
+            if (f.isDirectory() && !f.getName().endsWith("_desfeito") && new File(f, "depois").isDirectory()) ok.add(f);
         if (ok.isEmpty()) return null;
         Collections.sort(ok, new Comparator<File>() { public int compare(File x, File y) { return x.getName().compareTo(y.getName()); } });
         return ok.get(ok.size() - 1);
@@ -409,11 +410,11 @@ public class TabTrofeus {
             for (Map.Entry<String, byte[]> e : novos.entrySet())
                 if (!Arrays.equals(f.baixar(pasta + "/" + e.getKey()), e.getValue()))
                     throw new IOException(e.getKey() + " no PS3 ficou diferente do esperado");
-        } catch (IOException e) {
+        } catch (Exception e) {
             for (String nome : novos.keySet()) {
                 try { f.enviar(pasta + "/" + nome, originais.get(nome)); } catch (IOException ignored) { }
             }
-            throw e;
+            throw new IOException(e.getMessage() + ". O PSTudo voltou os arquivos originais; a cópia de segurança está no celular.");
         } finally {
             for (String t : temps) { try { f.apagarArquivo(t); } catch (IOException ignored) { } }
         }
@@ -425,7 +426,7 @@ public class TabTrofeus {
         ocupado = true;
         final List<Integer> ids = new ArrayList<Integer>(marcados);
         final File bk = new File(pastaBackup(), new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.ROOT).format(new Date()));
-        msg("Fazendo backup e conferindo a assinatura dos troféus…", Ui.CINZA);
+        msg("Fazendo backup e conferindo a assinatura dos troféus… (deixe o PS3 no XMB, sem jogo aberto)", Ui.CINZA);
         atualizarBotoes();
         a.bg(new Runnable() {
             public void run() {
@@ -446,12 +447,19 @@ public class TabTrofeus {
                         FileOutputStream o = new FileOutputStream(new File(bk, e.getKey()));
                         try { o.write(e.getValue()); } finally { o.close(); }
                     }
-                    Map<String, byte[]> novos = Trofeus.destravar(arqs, ids, System.currentTimeMillis());
-                    if (novos.isEmpty()) m = "Esses troféus já estavam destravados.";
+                    Trofeus.Resultado r = Trofeus.destravar(arqs, ids, System.currentTimeMillis());
+                    if (r.feitos == 0) m = "Esses troféus já estavam destravados.";
                     else {
                         a.ui(new Runnable() { public void run() { msg("Gravando no PS3…", Ui.CINZA); } });
-                        gravar(f, j.pasta, novos, arqs);
-                        m = "✓ Troféus destravados. Reinicie o PS3 para aparecerem. Não sincronize com a PSN.";
+                        gravar(f, j.pasta, r.novos, arqs);
+                        File depois = new File(bk, "depois");       // como ficou: o Desfazer confere antes de voltar
+                        if (depois.mkdirs() || depois.isDirectory())
+                            for (Map.Entry<String, byte[]> e : r.novos.entrySet()) {
+                                FileOutputStream o = new FileOutputStream(new File(depois, e.getKey()));
+                                try { o.write(e.getValue()); } finally { o.close(); }
+                            }
+                        m = "✓ " + r.feitos + " troféu(s) destravado(s). Reinicie o PS3 para aparecerem. Não sincronize com a PSN."
+                                + (r.pulouPlatina ? " A platina ficou de fora: ela só vem com todos os troféus do jogo." : "");
                     }
                 } catch (IOException e) {
                     m = "Não destravei: " + e.getMessage();
@@ -493,6 +501,10 @@ public class TabTrofeus {
                     for (String n : MUDAM) antes.put(n, lerArquivo(new File(bk, n)));
                     f = a.conectar();
                     for (String n : MUDAM) atuais.put(n, f.baixar(j.pasta + "/" + n));
+                    for (String n : MUDAM)
+                        if (!Arrays.equals(lerArquivo(new File(new File(bk, "depois"), n)), atuais.get(n)))
+                            throw new IOException("os troféus mudaram no PS3 depois que o PSTudo destravou (você ganhou algum jogando?). "
+                                    + "Desfazer agora apagaria isso, então não mexi.");
                     gravar(f, j.pasta, antes, atuais);
                     bk.renameTo(new File(bk.getPath() + "_desfeito"));     // o próximo "Desfazer" volta mais um passo
                     m = "✓ Desfeito: os troféus voltaram a como estavam em " + bk.getName().replace('_', ' ') + ". Reinicie o PS3.";

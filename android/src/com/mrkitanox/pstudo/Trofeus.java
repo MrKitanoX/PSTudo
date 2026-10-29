@@ -235,7 +235,7 @@ public final class Trofeus {
         public int id, tipo;
         public boolean destravado, sync, oculto;
         public long tempo;
-        public String nome = "", detalhe = "";
+        public String nome = "", detalhe = "", grupo = "";
     }
 
     static class Usr {
@@ -264,16 +264,23 @@ public final class Trofeus {
             Trofeu t = new Trofeu();
             int o = tempos[i];
             t.id = i; t.tipo = tipo(i);
-            t.destravado = u32(d, o + 4) == 1;
+            t.destravado = u32(d, o + 4) != 0;
             t.sync = (u32(d, o + 8) & SYNC) != 0;
             t.tempo = u64(d, o + 16);
             return t;
         }
 
+        long maiorTempo() {
+            long m = 0;
+            for (int o : tempos) m = Math.max(m, u64(d, o + 16));
+            for (int k : new int[]{16, 32, 64}) m = Math.max(m, u64(d, lista + k));
+            return m;
+        }
+
         boolean destravar(int i, long t) {
             int o = tempos[i];
-            if (u32(d, o + 4) == 1) return false;
-            p32(d, o + 4, 1); p32(d, o + 8, NAO_SYNC); p32(d, o + 12, 0); p64(d, o + 16, t); p64(d, o + 24, t);
+            if (u32(d, o + 4) != 0) return false;
+            p32(d, o + 4, 1); p32(d, o + 8, NAO_SYNC); p64(d, o + 16, t); p64(d, o + 24, t);
             p32(d, lista + 112, u32(d, lista + 112) + 1);
             p32(d, r7, u32(d, r7) + 1);
             int oa = lista + 128 + (i / 32) * 4;
@@ -287,7 +294,7 @@ public final class Trofeus {
     static class Trns {
         final byte[] d;
         final String npcomm;
-        final int b3, ini, passo, capacidade;
+        final int b3, ini, passo, capacidade, tipoBloco;
         int contagem;
 
         Trns(byte[] dados) throws Erro {
@@ -303,6 +310,7 @@ public final class Trofeus {
             long fim = d.length;
             for (long[] r : regs.values()) if (r[0] > ini && r[0] < fim) fim = r[0];   // não invade a parte seguinte
             capacidade = (int) ((fim - ini) / passo) - 1;
+            tipoBloco = u32(d, ini);
             contagem = u32(d, b3 + 20);
             if (contagem < 1 || contagem > capacidade + 1) throw new Erro("contagem estranha no TROPTRNS.DAT");
         }
@@ -316,13 +324,38 @@ public final class Trofeus {
             return r;
         }
 
-        boolean destravar(int i, int tipo, long t) throws Erro {
-            for (long[] g : ganhos()) if (g[0] == i) return false;
-            int k = contagem;
+        long maiorTempo() {
+            long m = 0;
+            for (long[] g : ganhos()) m = Math.max(m, g[1]);
+            return m;
+        }
+
+        /** Confere o formato (ganhos + 1 na contagem, próximo espaço vazio). Se não bater, é melhor não mexer. */
+        void conferirFormato(int total) throws Erro {
+            for (int k = 1; k < contagem; k++) {
+                int cab = ini + k * passo, o = cab + 16;
+                if (u32(d, cab) != tipoBloco || u32(d, cab + 4) != passo - 16 || u32(d, o + 4) == 0
+                        || (u32(d, o + 32) & 0xFFFFFFFFL) >= total)
+                    throw new Erro("o TROPTRNS.DAT está num formato que o PSTudo não reconhece. Nada foi alterado.");
+            }
+            conferirVazio(contagem);
+        }
+
+        void conferirVazio(int k) throws Erro {
             if (k > capacidade) throw new Erro("não há espaço no TROPTRNS.DAT");
+            int cab = ini + k * passo, o = cab + 16;
+            if (u32(d, cab) != tipoBloco || u32(d, cab + 4) != passo - 16 || u32(d, o + 4) != 0 || u32(d, o + 8) != 0
+                    || u32(d, o + 32) != 0 || u64(d, o + 48) != 0 || u64(d, o + 56) != 0)
+                throw new Erro("o espaço livre do TROPTRNS.DAT não está vazio. Nada foi alterado.");
+        }
+
+        boolean destravar(int i, int tipo, long t) throws Erro {
+            for (long[] g : ganhos()) if (g[0] == i) throw new Erro("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre este troféu. Nada foi alterado.");
+            int k = contagem;
+            conferirVazio(k);
             int o = ini + k * passo + 16;
             p32(d, o, k); p32(d, o + 4, 2); p32(d, o + 8, 0); p32(d, o + 12, 0);
-            Arrays.fill(d, o + 16, o + 32, (byte) 0);
+            Arrays.fill(d, o + 16, o + passo - 16, (byte) 0);
             p32(d, o + 32, i); p32(d, o + 36, tipo); p32(d, o + 40, 0x1000); p32(d, o + 44, 0);
             p64(d, o + 48, t); p64(d, o + 56, t);
             contagem++;
@@ -359,6 +392,8 @@ public final class Trofeus {
                             atual = new Trofeu();
                             atual.id = Integer.parseInt(p.getAttributeValue(null, "id"));
                             atual.oculto = "yes".equals(p.getAttributeValue(null, "hidden"));
+                            String gid = p.getAttributeValue(null, "gid");
+                            atual.grupo = gid == null ? "" : gid.trim();
                             destino.put(atual.id, atual);
                         } catch (Exception e) { atual = null; }
                     }
@@ -412,9 +447,14 @@ public final class Trofeus {
 
     public static int total(byte[] tropusr) throws Erro { return new Usr(tropusr).total; }
 
-    /** Destrava 'ids'. arqs = arquivos da pasta como estão no PS3. Devolve só os que mudam
-        (TROPUSR.DAT, TROPTRNS.DAT, PARAM.PFD); vazio se nada mudou. */
-    public static Map<String, byte[]> destravar(Map<String, byte[]> arqs, List<Integer> ids, long agoraMs) throws Erro {
+    public static class Resultado {
+        public final Map<String, byte[]> novos = new LinkedHashMap<String, byte[]>();   // só o que muda
+        public int feitos = 0;
+        public boolean pulouPlatina = false;
+    }
+
+    /** Destrava 'ids'. arqs = arquivos da pasta como estão no PS3. */
+    public static Resultado destravar(Map<String, byte[]> arqs, List<Integer> ids, long agoraMs) throws Erro {
         Pfd pfd = new Pfd(arqs.get("PARAM.PFD"));
         List<String> erros = pfd.conferir(arqs);
         if (!erros.isEmpty()) throw new Erro("a assinatura atual destes troféus não bateu com o cálculo do PSTudo ("
@@ -423,19 +463,45 @@ public final class Trofeus {
         Trns trns = new Trns(pfd.decifrar("TROPTRNS.DAT", arqs.get("TROPTRNS.DAT")));
         if (!usr.npcomm.isEmpty() && !trns.npcomm.isEmpty() && !usr.npcomm.equals(trns.npcomm))
             throw new Erro("TROPUSR.DAT e TROPTRNS.DAT são de jogos diferentes.");
-        long t = tempoPs3(agoraMs), ultimo = 0;
-        for (long[] g : trns.ganhos()) ultimo = Math.max(ultimo, g[1]);
+        trns.conferirFormato(usr.total);
+        java.util.Set<Long> ganhosT = new java.util.HashSet<Long>(), ganhosU = new java.util.HashSet<Long>();
+        for (long[] g : trns.ganhos()) ganhosT.add(g[0]);
+        for (int i = 0; i < usr.total; i++) if (usr.info(i).destravado) ganhosU.add((long) i);
+        if (!ganhosT.equals(ganhosU)) throw new Erro("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre os troféus ganhos. Nada foi alterado.");
+        long t = tempoPs3(agoraMs), ultimo = Math.max(trns.maiorTempo(), usr.maiorTempo());
         if (t <= ultimo) t = ultimo + 1000000L;
-        int feitos = 0;
+        // platina (tipo 1) só por último, e só se todos os troféus do jogo base ficarem ganhos
+        Map<Integer, Trofeu> conf = new HashMap<Integer, Trofeu>();
+        if (arqs.containsKey("TROPCONF.SFM")) lerSfm(arqs.get("TROPCONF.SFM"), conf);
+        List<Integer> outros = new ArrayList<Integer>(), platinas = new ArrayList<Integer>();
         for (int i : new TreeSet<Integer>(ids)) {
             if (i < 0 || i >= usr.total || usr.info(i).destravado) continue;
+            if (usr.tipo(i) == 1) platinas.add(i); else outros.add(i);
+        }
+        java.util.Set<Integer> vaoFicar = new java.util.HashSet<Integer>(outros);
+        for (int i = 0; i < usr.total; i++) if (usr.info(i).destravado) vaoFicar.add(i);
+        boolean baseCompleta = true;
+        for (int i = 0; i < usr.total; i++) {
+            if (usr.tipo(i) == 1) continue;
+            Trofeu c = conf.get(i);
+            String g = c == null ? "" : c.grupo;
+            if ((g.isEmpty() || g.equals("0") || g.equals("000")) && !vaoFicar.contains(i)) baseCompleta = false;
+        }
+        Resultado res = new Resultado();
+        res.pulouPlatina = !platinas.isEmpty() && !baseCompleta;
+        List<Integer> ordem = new ArrayList<Integer>(outros);
+        if (!res.pulouPlatina) ordem.addAll(platinas);
+        for (int i : ordem) {
             usr.destravar(i, t);
             trns.destravar(i, usr.tipo(i), t);
             t += 1000000L;           // um segundo entre cada um, na ordem
-            feitos++;
+            res.feitos++;
         }
-        Map<String, byte[]> novos = new LinkedHashMap<String, byte[]>();
-        if (feitos == 0) return novos;
+        if (res.feitos == 0) {
+            if (res.pulouPlatina) throw new Erro("a platina só pode ser destravada junto com (ou depois de) todos os troféus do jogo.");
+            return res;
+        }
+        Map<String, byte[]> novos = res.novos;
         byte[] cif = pfd.cifrar("TROPTRNS.DAT", trns.d);
         byte[] original = arqs.get("TROPTRNS.DAT");
         if (cif.length < original.length) {     // mantém o tamanho do arquivo
@@ -455,7 +521,7 @@ public final class Trofeus {
         if (new Trns(p2.decifrar("TROPTRNS.DAT", cif)).contagem != trns.contagem)
             throw new Erro("o TROPTRNS.DAT novo não conferiu. Nada foi alterado.");
         novos.put("PARAM.PFD", novoPfd);
-        return novos;
+        return res;
     }
 
     static boolean iguais(byte[] a, byte[] b) {
