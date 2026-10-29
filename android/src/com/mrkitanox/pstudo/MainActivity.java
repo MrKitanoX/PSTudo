@@ -30,7 +30,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/** PSTudo para Android: Enviar jogos, Arquivos, Licenças, Console, Updates e Controle (sem a aba Tela). */
+/** PSTudo para Android: Enviar jogos, Arquivos, Licenças, Console, Updates, Controle e Troféus (sem a aba Tela). */
 public class MainActivity extends Activity {
     public interface Resultado { void ok(Intent dados); }
 
@@ -40,6 +40,7 @@ public class MainActivity extends Activity {
     private TextView pillTx;
     private View pillPonto;
     private FrameLayout conteudo;
+    private android.widget.HorizontalScrollView navRolagem;
     private final List<TextView> abasTx = new ArrayList<TextView>();
     private int aba = 0;
     private Resultado esperando;
@@ -51,6 +52,7 @@ public class MainActivity extends Activity {
     public TabConsole tabConsole;
     public TabUpdates tabUpdates;
     public TabControle tabControle;
+    public TabTrofeus tabTrofeus;
 
     // ------------------------------------------------------------------ ciclo de vida
     @Override
@@ -65,6 +67,7 @@ public class MainActivity extends Activity {
         tabConsole = new TabConsole(this);
         tabUpdates = new TabUpdates(this);
         tabControle = new TabControle(this);
+        tabTrofeus = new TabTrofeus(this);
 
         LinearLayout raiz = Ui.coluna(this);
         GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
@@ -98,23 +101,27 @@ public class MainActivity extends Activity {
         conteudo = new FrameLayout(this);
         raiz.addView(conteudo, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
-        // abas embaixo
+        // abas embaixo (rolam para o lado quando não cabem)
+        navRolagem = new android.widget.HorizontalScrollView(this);
+        navRolagem.setHorizontalScrollBarEnabled(false);
+        navRolagem.setFillViewport(true);
+        navRolagem.setBackground(Ui.fundo(this, 0xF00A1222, 24, Ui.BORDA));
         LinearLayout nav = Ui.linha(this);
-        nav.setBackground(Ui.fundo(this, 0xF00A1222, 24, Ui.BORDA));
         nav.setPadding(dp(5), dp(5), dp(5), dp(5));
         for (int i = 0; i < NOMES_ABAS.length; i++) {
             final int k = i;
-            TextView t = Ui.texto(this, NOMES_ABAS[i], 11, Ui.CINZA, Ui.FORTE);
+            TextView t = Ui.texto(this, NOMES_ABAS[i], 12, Ui.CINZA, Ui.FORTE);
             t.setSingleLine(true);
             t.setGravity(Gravity.CENTER);
-            t.setPadding(0, dp(9), 0, dp(9));
+            t.setPadding(dp(11), dp(9), dp(11), dp(9));
             t.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) { mostrarAba(k); }
             });
             abasTx.add(t);
-            nav.addView(t, Ui.lpPeso(1));
+            nav.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         }
-        raiz.addView(nav, Ui.margem(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 12, 4, 12, 4));
+        navRolagem.addView(nav, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        raiz.addView(navRolagem, Ui.margem(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 12, 4, 12, 4));
         TextView cred = Ui.texto(this, "Feito por MrKitanoX usando o Claude", 10, Ui.CINZA_ESCURO, Ui.NORMAL);
         cred.setGravity(Gravity.END);
         cred.setPadding(0, 0, dp(16), dp(8));
@@ -152,7 +159,7 @@ public class MainActivity extends Activity {
 
     public int dp(float v) { return Ui.dp(this, v); }
 
-    static final String[] NOMES_ABAS = {"Enviar", "Arquivos", "Licenças", "Console", "Updates", "Controle"};
+    static final String[] NOMES_ABAS = {"Enviar", "Arquivos", "Licenças", "Console", "Updates", "Controle", "Troféus"};
 
     // ------------------------------------------------------------------ abas
     public void mostrarAba(int k) {
@@ -165,7 +172,11 @@ public class MainActivity extends Activity {
         }
         conteudo.removeAllViews();
         View v = k == 0 ? tabEnviar.view() : k == 1 ? tabArquivos.view() : k == 2 ? tabLicencas.view()
-                : k == 3 ? tabConsole.view() : k == 4 ? tabUpdates.view() : tabControle.view();
+                : k == 3 ? tabConsole.view() : k == 4 ? tabUpdates.view() : k == 5 ? tabControle.view() : tabTrofeus.view();
+        final TextView alvo = abasTx.get(k);
+        navRolagem.post(new Runnable() { public void run() {
+            navRolagem.smoothScrollTo(Math.max(0, alvo.getLeft() - (navRolagem.getWidth() - alvo.getWidth()) / 2), 0);
+        } });
         conteudo.addView(v, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
@@ -261,6 +272,7 @@ public class MainActivity extends Activity {
             tabConsole.statusMudou();
             tabUpdates.statusMudou();
             tabControle.statusMudou();
+            tabTrofeus.statusMudou();
         }
     }
 

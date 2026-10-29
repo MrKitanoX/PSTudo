@@ -805,9 +805,9 @@ BTN_HOVER = "#20345C"
 
 class Extras:
     # ================================================= abas
-    ABAS = [("enviar", "Enviar jogos", 98), ("arquivos", "Arquivos", 76), ("rap", "Licenças", 76),
-            ("updates", "Updates", 76), ("console", "Console", 74), ("tela", "Tela", 56)]
-    ABAS_X = 402
+    ABAS = [("enviar", "Enviar", 64), ("arquivos", "Arquivos", 70), ("rap", "Licenças", 70),
+            ("updates", "Updates", 70), ("trofeus", "Troféus", 70), ("console", "Console", 68), ("tela", "Tela", 50)]
+    ABAS_X = 405
 
     def _montar_abas(self):
         p, c = self.p, self.c
@@ -859,7 +859,7 @@ class Extras:
     def _mostrar_aba(self, k):
         {"enviar": self._tela_enviar, "arquivos": self.tela_arquivos, "rap": self.tela_rap,
          "console": self.tela_console, "tela": self.tela_espelho,
-         "updates": self.tela_updates}[k]()
+         "updates": self.tela_updates, "trofeus": self.tela_trofeus}[k]()
 
     def _tela_enviar(self):
         """Aba Enviar jogos: progresso se estiver enviando, resultado pendente, ou a tela inicial."""
@@ -878,13 +878,13 @@ class Extras:
         c, p = self.c, self.p
         if not getattr(self, "aba_tx", None):
             return
-        nome = texto or ("Enviar jogos" if frac is None else f"Enviando {int(frac * 100)}%")
+        nome = texto or ("Enviar" if frac is None else f"↑ {int(frac * 100)}%")
         c.itemconfig(self.aba_tx["enviar"], text=nome)
         if frac is None:
             c.itemconfig(self.aba_barra, state="hidden")
             return
-        x0 = self.aba_pos["enviar"] - 40
-        c.coords(self.aba_barra, p.px(x0), p.px(70), p.px(x0 + 80 * max(0.03, frac)), p.px(72))
+        x0 = self.aba_pos["enviar"] - 26
+        c.coords(self.aba_barra, p.px(x0), p.px(70), p.px(x0 + 52 * max(0.03, frac)), p.px(72))
         c.itemconfig(self.aba_barra, state="normal")
         c.tag_raise(self.aba_barra)
 
@@ -5983,6 +5983,931 @@ class ControleRemoto:
         self.c.itemconfig(self.pad_tx, fill=BRANCO)
 
 
+# =============================================================== Troféus (destravar localmente, PS3 HEN)
+# Formato dos arquivos: TROPUSR.DAT / TROPTRNS.DAT (engenharia reversa do PS3TrophyIsGood/TROPHYParser
+# de darkautism) e PARAM.PFD (pfdtool de flatz; mesma lógica usada pelo Apollo Save Tool de bucanero).
+# Só TROPUSR.DAT e TROPTRNS.DAT mudam; as chaves deles são iguais em todo PS3, então não é preciso a
+# ID do console nem da conta. Antes de gravar, a assinatura atual é recalculada e precisa bater com a
+# do PS3; se não bater, nada é alterado.
+import hashlib as _hashlib
+import hmac as _hmac
+
+TROFEU_CHAVES = {
+    "syscon": bytes.fromhex("D413B89663E1FE9F75143D3BB4565274"),
+    "keygen": bytes.fromhex("6B1ACEA246B745FD8F93763B920594CD53483B82"),
+    "PARAM.SFO": bytes.fromhex("5D5B647917024E9BB8D330486B996E795D7F4392"),
+    "TROPSYS.DAT": bytes.fromhex("B080C40FF358643689281736A6BF15892CFEA436"),
+    "TROPUSR.DAT": bytes.fromhex("8711EFF406913F0937F115FAB23DE1A9897A789A"),
+    "TROPTRNS.DAT": bytes.fromhex("91EE81555ACC1C4FB5AAE5462CFE1C62A4AF36A5"),
+    "TROPCONF.SFM": bytes.fromhex("E2ED33C71C444EEBC1E23D635AD8E82F4ECA4E94"),
+}
+TROP_MAGIC = 0x818F54AD00010000
+TROP_SYNC = 0x00010000          # já foi para a PSN
+TROP_NAO_SYNC = 0x00001000      # destravado só no console
+TIPOS_TROFEU = {1: "Platina", 2: "Ouro", 3: "Prata", 4: "Bronze"}
+
+
+class ErroTrofeu(Exception):
+    pass
+
+
+def _aes():
+    from Crypto.Cipher import AES
+    return AES
+
+
+def tempo_ps3(segundos_unix):
+    """Tempo do PS3: microssegundos desde o ano 1 (UTC)."""
+    return int(segundos_unix * 1_000_000) + 62135596800000000
+
+
+def tempo_unix(t):
+    return (t - 62135596800000000) / 1_000_000 if t else 0
+
+
+# ---------------------------------------------------------------- PARAM.PFD
+class Pfd:
+    ENTRADA = 272
+
+    def __init__(self, dados):
+        self.dados = bytearray(dados)
+        d = self.dados
+        if d[:8] != b"\0\0\0\0PFDB":
+            raise ErroTrofeu("PARAM.PFD inválido")
+        self.versao = struct.unpack_from(">Q", d, 8)[0]
+        if self.versao not in (3, 4):
+            raise ErroTrofeu(f"PARAM.PFD de versão desconhecida ({self.versao})")
+        self.iv = bytes(d[16:32])
+        AES = _aes()
+        sig = AES.new(TROFEU_CHAVES["syscon"], AES.MODE_CBC, self.iv).decrypt(bytes(d[32:96]))
+        self.sig = bytearray(sig)
+        chave = bytes(sig[40:60])
+        self.chave_real = (_hmac.new(TROFEU_CHAVES["keygen"], chave, _hashlib.sha1).digest()
+                           if self.versao == 4 else chave)
+        self.capacidade, self.reservadas, self.usadas = struct.unpack_from(">QQQ", d, 96)
+        if not (0 < self.capacidade < 1000 and self.usadas <= self.reservadas < 1000):
+            raise ErroTrofeu("PARAM.PFD com tabela estranha")
+        self.ini_entradas = 96 + 24 + self.capacidade * 8
+        self.ini_assinaturas = self.ini_entradas + self.reservadas * self.ENTRADA
+        if self.ini_assinaturas + self.capacidade * 20 > len(d):
+            raise ErroTrofeu("PARAM.PFD cortado")
+
+    def _indice(self, i):
+        return struct.unpack_from(">Q", self.dados, 120 + i * 8)[0]
+
+    def _entrada(self, n):
+        o = self.ini_entradas + n * self.ENTRADA
+        return o, bytes(self.dados[o:o + self.ENTRADA])
+
+    @staticmethod
+    def _nome(e):
+        return e[8:8 + 65].split(b"\0")[0].decode("latin-1")
+
+    def arquivos(self):
+        """{nome: índice da entrada}"""
+        r = {}
+        for n in range(self.usadas):
+            r[self._nome(self._entrada(n)[1]).upper()] = n
+        return r
+
+    def tamanho(self, nome):
+        o, e = self._entrada(self.arquivos()[nome.upper()])
+        return struct.unpack_from(">Q", e, 264)[0]
+
+    def _balde(self, nome):
+        h = 0
+        for ch in nome.encode("latin-1"):
+            h = ((h << 5) - h + ch) & 0xFFFFFFFFFFFFFFFF
+        return h % self.capacidade
+
+    def _hash_balde(self, i):
+        atual = self._indice(i)
+        if atual >= self.reservadas:
+            return _hmac.new(self.chave_real, b"", _hashlib.sha1).digest()
+        m = _hmac.new(self.chave_real, digestmod=_hashlib.sha1)
+        vistos = 0
+        while atual < self.reservadas and vistos <= self.reservadas:
+            _, e = self._entrada(atual)
+            m.update(e[8:8 + 65])
+            m.update(e[80:80 + 192])
+            atual = struct.unpack_from(">Q", e, 0)[0]
+            vistos += 1
+        return m.digest()
+
+    @staticmethod
+    def hash_arquivo(nome, conteudo):
+        chave = TROFEU_CHAVES.get(nome.upper())
+        if chave is None:
+            return None
+        return _hmac.new(chave, conteudo, _hashlib.sha1).digest()
+
+    def conferir(self, arquivos):
+        """Recalcula tudo e diz o que não bate (lista vazia = assinatura igual à do PS3).
+        arquivos = {nome: bytes como estão no PS3}"""
+        erros = []
+        d = self.dados
+        top = _hmac.new(self.chave_real, bytes(d[96:96 + 24 + self.capacidade * 8]), _hashlib.sha1).digest()
+        if top != bytes(self.sig[20:40]):
+            erros.append("topo")
+        fim = self.ini_assinaturas + self.capacidade * 20
+        baixo = _hmac.new(self.chave_real, bytes(d[self.ini_assinaturas:fim]), _hashlib.sha1).digest()
+        if baixo != bytes(self.sig[0:20]):
+            erros.append("base")
+        for i in range(self.capacidade):
+            o = self.ini_assinaturas + i * 20
+            if self._hash_balde(i) != bytes(d[o:o + 20]):
+                erros.append(f"entrada {i}")
+        for nome, n in self.arquivos().items():
+            o, e = self._entrada(n)
+            if nome not in arquivos:
+                continue
+            h = self.hash_arquivo(nome, arquivos[nome])
+            if h is not None and h != e[144:164]:
+                erros.append(nome)
+        return erros
+
+    def atualizar(self, arquivos):
+        """Grava o hash novo dos arquivos alterados e refaz as assinaturas."""
+        d = self.dados
+        nomes = self.arquivos()
+        for nome, conteudo in arquivos.items():
+            n = nomes.get(nome.upper())
+            if n is None:
+                raise ErroTrofeu(f"{nome} não está no PARAM.PFD")
+            o, _ = self._entrada(n)
+            d[o + 144:o + 164] = self.hash_arquivo(nome, conteudo)
+        for i in range(self.capacidade):
+            o = self.ini_assinaturas + i * 20
+            d[o:o + 20] = self._hash_balde(i)
+        fim = self.ini_assinaturas + self.capacidade * 20
+        self.sig[0:20] = _hmac.new(self.chave_real, bytes(d[self.ini_assinaturas:fim]), _hashlib.sha1).digest()
+        self.sig[20:40] = _hmac.new(self.chave_real, bytes(d[96:96 + 24 + self.capacidade * 8]),
+                                    _hashlib.sha1).digest()
+        AES = _aes()
+        d[32:96] = AES.new(TROFEU_CHAVES["syscon"], AES.MODE_CBC, self.iv).encrypt(bytes(self.sig))
+        return bytes(d)
+
+    def _chave_dados(self, nome):
+        AES = _aes()
+        _, e = self._entrada(self.arquivos()[nome.upper()])
+        k = TROFEU_CHAVES[nome.upper()]
+        return AES.new(TROFEU_CHAVES["syscon"], AES.MODE_CBC, k[:16]).decrypt(e[80:144])[:16]
+
+    def _xor_contador(self, chave, n_blocos):
+        AES = _aes()
+        ecb = AES.new(chave, AES.MODE_ECB)
+        return ecb.encrypt(b"".join(struct.pack(">QQ", i, 0) for i in range(n_blocos)))
+
+    def decifrar(self, nome, dados):
+        AES = _aes()
+        tam = self.tamanho(nome)
+        alinhado = (tam + 15) // 16 * 16
+        bruto = dados[:alinhado].ljust(alinhado, b"\0")
+        k = self._chave_dados(nome)
+        dec = AES.new(k, AES.MODE_ECB).decrypt(bruto)
+        ctr = self._xor_contador(k, alinhado // 16)
+        return bytes(a ^ b for a, b in zip(dec, ctr))[:tam]
+
+    def cifrar(self, nome, dados):
+        AES = _aes()
+        alinhado = (len(dados) + 15) // 16 * 16
+        k = self._chave_dados(nome)
+        ctr = self._xor_contador(k, alinhado // 16)
+        mist = bytes(a ^ b for a, b in zip(dados.ljust(alinhado, b"\0"), ctr))
+        return AES.new(k, AES.MODE_ECB).encrypt(mist)
+
+
+# ---------------------------------------------------------------- TROPUSR.DAT / TROPTRNS.DAT
+def _registros(d, nome):
+    if len(d) < 48 or struct.unpack_from(">Q", d, 0)[0] != TROP_MAGIC:
+        raise ErroTrofeu(f"{nome} inválido")
+    n = struct.unpack_from(">I", d, 8)[0]
+    if not 0 < n < 64:
+        raise ErroTrofeu(f"{nome} com tabela estranha")
+    regs = {}
+    for i in range(n):
+        rid, tam, _u, usos, ofs = struct.unpack_from(">IIIIQ", d, 48 + i * 32)
+        regs[rid] = (ofs, tam, usos)
+    return regs
+
+
+def _blocos(d, ofs, qtd):
+    """Lista de posições dos dados de 'qtd' blocos seguidos (cada um: cabeçalho de 16 bytes + dados)."""
+    r = []
+    for _ in range(qtd):
+        if ofs + 16 > len(d):
+            raise ErroTrofeu("bloco fora do arquivo")
+        _tipo, tam = struct.unpack_from(">II", d, ofs)
+        if tam == 0 or ofs + 16 + tam > len(d):
+            raise ErroTrofeu("bloco com tamanho estranho")
+        r.append(ofs + 16)
+        ofs += 16 + tam
+    return r
+
+
+class TropUsr:
+    def __init__(self, dados):
+        self.d = bytearray(dados)
+        d = self.d
+        regs = _registros(d, "TROPUSR.DAT")
+        for k in (3, 4, 5, 6, 7):
+            if k not in regs:
+                raise ErroTrofeu("TROPUSR.DAT sem a parte %d" % k)
+        b3 = regs[3][0] + 16
+        self.npcomm = bytes(d[b3:b3 + 16]).split(b"\0")[0].decode("latin-1")
+        self.total = struct.unpack_from(">I", d, b3 + 24)[0]
+        if not 0 < self.total <= 128:
+            raise ErroTrofeu("número de troféus estranho")
+        self.tipos = _blocos(d, regs[4][0], self.total)
+        self.lista = regs[5][0] + 16
+        self.tempos = _blocos(d, regs[6][0], self.total)
+        self.r7 = regs[7][0] + 16
+
+    def tipo(self, i):
+        return struct.unpack_from(">I", self.d, self.tipos[i] + 4)[0]
+
+    def info(self, i):
+        o = self.tempos[i]
+        _seq, dest, sync, _u, t1 = struct.unpack_from(">IIIIQ", self.d, o)
+        return {"id": i, "tipo": self.tipo(i), "destravado": dest == 1, "sync": bool(sync & TROP_SYNC), "tempo": t1}
+
+    def destravar(self, i, t):
+        d, o = self.d, self.tempos[i]
+        if struct.unpack_from(">I", d, o + 4)[0] == 1:
+            return False
+        struct.pack_into(">IIIQQ", d, o + 4, 1, TROP_NAO_SYNC, 0, t, t)
+        n = struct.unpack_from(">I", d, self.lista + 112)[0]
+        struct.pack_into(">I", d, self.lista + 112, n + 1)
+        n7 = struct.unpack_from(">I", d, self.r7)[0]
+        struct.pack_into(">I", d, self.r7, n7 + 1)
+        oa = self.lista + 128 + (i // 32) * 4
+        struct.pack_into(">I", d, oa, struct.unpack_from(">I", d, oa)[0] | (1 << (i % 32)))
+        if struct.unpack_from(">Q", d, self.lista + 64)[0] < t:          # último troféu ganho
+            struct.pack_into(">QQ", d, self.lista + 64, t, t)
+        struct.pack_into(">QQ", d, self.lista + 32, t, t)                  # última atualização
+        return True
+
+
+class TropTrns:
+    def __init__(self, dados):
+        self.d = bytearray(dados)
+        d = self.d
+        regs = _registros(d, "TROPTRNS.DAT")
+        if 3 not in regs or 4 not in regs:
+            raise ErroTrofeu("TROPTRNS.DAT incompleto")
+        self.b3 = regs[3][0] + 16
+        self.npcomm = bytes(d[self.b3:self.b3 + 16]).split(b"\0")[0].decode("latin-1")
+        ofs4 = regs[4][0]
+        tam_bloco = struct.unpack_from(">I", d, ofs4 + 4)[0]
+        if tam_bloco < 64:
+            raise ErroTrofeu("TROPTRNS.DAT com bloco estranho")
+        self.passo = 16 + tam_bloco
+        self.ini = ofs4                       # bloco 0 = hora de início; 1.. = troféus ganhos
+        depois = [o for o, _t, _u in regs.values() if o > ofs4]
+        fim = min(depois) if depois else len(d)       # não invade a parte seguinte do arquivo
+        self.capacidade = (fim - ofs4) // self.passo - 1
+        self.contagem = struct.unpack_from(">I", d, self.b3 + 20)[0]     # ganhos + 1
+        if not 1 <= self.contagem <= self.capacidade + 1:
+            raise ErroTrofeu("contagem estranha no TROPTRNS.DAT")
+
+    def ganhos(self):
+        r = []
+        for k in range(1, self.contagem):
+            o = self.ini + k * self.passo + 16
+            tid, tp = struct.unpack_from(">II", self.d, o + 32)
+            sync = struct.unpack_from(">I", self.d, o + 8)[0]
+            t = struct.unpack_from(">Q", self.d, o + 48)[0]
+            r.append({"id": tid, "tipo": tp, "sync": sync != 0, "tempo": t})
+        return r
+
+    def destravar(self, i, tipo, t):
+        if any(g["id"] == i for g in self.ganhos()):
+            return False
+        k = self.contagem
+        if k > self.capacidade:
+            raise ErroTrofeu("não há espaço no TROPTRNS.DAT")
+        o = self.ini + k * self.passo + 16
+        struct.pack_into(">IIII", self.d, o, k, 2, 0, 0)
+        self.d[o + 16:o + 32] = b"\0" * 16
+        struct.pack_into(">IIIIQQ", self.d, o + 32, i, tipo, 0x1000, 0, t, t)
+        self.contagem += 1
+        struct.pack_into(">I", self.d, self.b3 + 20, self.contagem)
+        return True
+
+
+# ---------------------------------------------------------------- nomes (TROP.SFM)
+def ler_sfm(dados):
+    """{id: {"nome", "detalhe", "tipo", "oculto"}} e o nome do jogo."""
+    import re
+    import xml.etree.ElementTree as ET
+    i = dados.find(b"<?xml")
+    if i < 0:
+        i = dados.find(b"<trophyconf")
+    if i < 0:
+        return {}, ""
+    texto = dados[i:].split(b"\0")[0]
+    try:
+        raiz = ET.fromstring(texto)
+    except ET.ParseError:
+        texto = re.sub(rb"&(?!amp;|lt;|gt;|quot;|apos;|#)", b"&amp;", texto)
+        try:
+            raiz = ET.fromstring(texto)
+        except ET.ParseError:
+            return {}, ""
+    jogo = (raiz.findtext("title-name") or "").strip()
+    r = {}
+    for t in raiz.iter("trophy"):
+        try:
+            tid = int(t.get("id", ""))
+        except ValueError:
+            continue
+        r[tid] = {"nome": (t.findtext("name") or "").strip(), "detalhe": (t.findtext("detail") or "").strip(),
+                  "ttype": t.get("ttype", ""), "oculto": t.get("hidden", "no") == "yes"}
+    return r, jogo
+
+
+def destravar_trofeus(arquivos, ids, agora=None):
+    """arquivos = {nome: bytes} da pasta do troféu, como estão no PS3.
+    Devolve {nome: bytes novos} só dos arquivos que mudam (TROPUSR.DAT, TROPTRNS.DAT, PARAM.PFD)."""
+    agora = agora or time.time()
+    pfd = Pfd(arquivos["PARAM.PFD"])
+    erros = pfd.conferir(arquivos)
+    if erros:
+        raise ErroTrofeu("A assinatura atual destes troféus não bateu com o cálculo do PSTudo "
+                         f"({', '.join(erros[:4])}). Por segurança, nada foi alterado.")
+    usr = TropUsr(arquivos["TROPUSR.DAT"])
+    trns_plano = pfd.decifrar("TROPTRNS.DAT", arquivos["TROPTRNS.DAT"])
+    trns = TropTrns(trns_plano)
+    if usr.npcomm and trns.npcomm and usr.npcomm != trns.npcomm:
+        raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT são de jogos diferentes.")
+    ganhos = trns.ganhos()
+    t = tempo_ps3(agora)
+    ultimo = max([g["tempo"] for g in ganhos] + [0])
+    if t <= ultimo:
+        t = ultimo + 1_000_000
+    feitos = 0
+    for i in sorted(set(ids)):
+        if not 0 <= i < usr.total:
+            continue
+        if usr.info(i)["destravado"]:
+            continue
+        usr.destravar(i, t)
+        trns.destravar(i, usr.tipo(i), t)
+        t += 1_000_000                       # um segundo entre cada um, na ordem
+        feitos += 1
+    if not feitos:
+        return {}, 0
+    novo_usr = bytes(usr.d)
+    novo_trns = pfd.cifrar("TROPTRNS.DAT", bytes(trns.d))
+    novo_trns = novo_trns + arquivos["TROPTRNS.DAT"][len(novo_trns):]   # mantém o tamanho do arquivo
+    novos = {"TROPUSR.DAT": novo_usr, "TROPTRNS.DAT": novo_trns}
+    novo_pfd = pfd.atualizar(novos)
+    # confere o resultado antes de devolver
+    final = dict(arquivos)
+    final.update(novos)
+    final["PARAM.PFD"] = novo_pfd
+    p2 = Pfd(novo_pfd)
+    if p2.conferir(final):
+        raise ErroTrofeu("A assinatura nova não conferiu. Nada foi alterado.")
+    if TropTrns(p2.decifrar("TROPTRNS.DAT", novo_trns)).contagem != trns.contagem:
+        raise ErroTrofeu("O TROPTRNS.DAT novo não conferiu. Nada foi alterado.")
+    novos["PARAM.PFD"] = novo_pfd
+    return novos, feitos
+
+
+def resumo_trofeus(arquivos):
+    """Lista dos troféus de uma pasta: [{id, tipo, destravado, sync, tempo, nome, detalhe, oculto}], jogo."""
+    usr = TropUsr(arquivos["TROPUSR.DAT"])
+    nomes, jogo = {}, ""
+    for chave in ("TROP_17.SFM", "TROP_07.SFM", "TROP.SFM", "TROPCONF.SFM"):
+        if chave in arquivos:
+            n, j = ler_sfm(arquivos[chave])
+            if n and not nomes:
+                nomes = n
+            jogo = jogo or j
+            if nomes and jogo:
+                break
+    lista = []
+    for i in range(usr.total):
+        x = usr.info(i)
+        x.update(nomes.get(i, {"nome": f"Troféu {i}", "detalhe": "", "ttype": "", "oculto": False}))
+        lista.append(x)
+    return lista, jogo or usr.npcomm
+
+
+HOME_PS3 = "/dev_hdd0/home"
+ARQS_TROFEU_MUDAM = ("TROPUSR.DAT", "TROPTRNS.DAT", "PARAM.PFD")
+
+
+def listar_usuarios_ps3(ftp):
+    """[(id, nome)] dos usuários do PS3."""
+    r = []
+    try:
+        itens = listar_remoto(ftp, HOME_PS3)
+    except ftplib.all_errors:
+        return r
+    for nome, eh_pasta, _ in itens:
+        if not eh_pasta or not nome.isdigit():
+            continue
+        try:
+            apelido = ler_bytes_remoto(ftp, f"{HOME_PS3}/{nome}/localusername", 64).split(b"\0")[0]
+            apelido = apelido.decode("utf-8", "ignore").strip()
+        except ftplib.all_errors:
+            apelido = ""
+        r.append((nome, apelido or f"Usuário {int(nome)}"))
+    return r
+
+
+def listar_trofeus_ps3(ftp, usuario, avisar=None):
+    """Jogos com troféus do usuário: [{pasta, codigo, jogo, total, ganhos}]."""
+    import re
+    base = f"{HOME_PS3}/{usuario}/trophy"
+    r = []
+    try:
+        pastas = listar_remoto(ftp, base)
+    except ftplib.all_errors:
+        return r
+    for nome, eh_pasta, _ in pastas:
+        if not eh_pasta:
+            continue
+        pasta = f"{base}/{nome}"
+        if avisar:
+            avisar(f"Lendo {nome}…")
+        try:
+            usr = TropUsr(ler_bytes_remoto(ftp, f"{pasta}/TROPUSR.DAT"))
+        except (ftplib.all_errors, ErroTrofeu):
+            continue
+        ganhos = sum(1 for i in range(usr.total) if usr.info(i)["destravado"])
+        jogo = ""
+        for sfm in ("TROPCONF.SFM", "TROP.SFM"):
+            try:
+                topo = ler_bytes_remoto(ftp, f"{pasta}/{sfm}", 8192)
+            except ftplib.all_errors:
+                continue
+            m = re.search(rb"<title-name>(.*?)</title-name>", topo, re.S)
+            if m:
+                jogo = m.group(1).decode("utf-8", "ignore").strip()
+                break
+        import html
+        r.append({"pasta": pasta, "codigo": nome, "jogo": html.unescape(jogo) or nome, "total": usr.total,
+                  "ganhos": ganhos})
+    return sorted(r, key=lambda x: sem_acento(x["jogo"]).lower())
+
+
+def baixar_pasta_trofeu(ftp, pasta):
+    """{nome: bytes} de todos os arquivos da pasta do troféu (menos as imagens)."""
+    arqs = {}
+    for nome, eh_pasta, _ in listar_remoto(ftp, pasta):
+        if eh_pasta or nome.upper().endswith(".PNG"):
+            continue
+        arqs[nome.upper()] = ler_bytes_remoto(ftp, f"{pasta}/{nome}")
+    return arqs
+
+
+def pasta_backup_trofeus(usuario, codigo):
+    return os.path.join(os.path.expanduser("~"), "PSTudo", "backup_trofeus", usuario, codigo)
+
+
+def gravar_trofeus_ps3(ftp, pasta, novos, originais):
+    """Grava os arquivos novos com segurança: primeiro com outro nome, depois troca; no fim confere.
+    Se algo falhar no meio, volta os originais."""
+    import io
+    temporarios = {}
+    try:
+        for nome, dados in novos.items():
+            tmp = f"{pasta}/{nome}.pstudo"
+            ftp.storbinary(f"STOR {tmp}", io.BytesIO(dados))
+            if tamanho_remoto(ftp, tmp) != len(dados):
+                raise ErroTrofeu(f"o PS3 não gravou {nome} inteiro")
+            temporarios[nome] = tmp
+        for nome in novos:
+            try:
+                ftp.delete(f"{pasta}/{nome}")
+            except ftplib.error_perm:
+                pass
+            ftp.rename(temporarios[nome], f"{pasta}/{nome}")
+        for nome, dados in novos.items():
+            if ler_bytes_remoto(ftp, f"{pasta}/{nome}") != dados:
+                raise ErroTrofeu(f"{nome} no PS3 ficou diferente do esperado")
+    except Exception:
+        for nome in novos:                       # volta como estava
+            try:
+                ftp.storbinary(f"STOR {pasta}/{nome}", io.BytesIO(originais[nome]))
+            except ftplib.all_errors:
+                pass
+        raise
+    finally:
+        for tmp in temporarios.values():
+            try:
+                ftp.delete(tmp)
+            except ftplib.all_errors:
+                pass
+
+
+class Trofeus:
+    # ================================================= aba TROFÉUS
+    def _tr(self):
+        if not hasattr(self, "tr_estado"):
+            self.tr_estado = {"usuarios": None, "usuario": None, "jogos": None, "lendo": False, "sel": None,
+                              "lista": {}, "marcados": set(), "ocupado": False, "msg": ("", CINZA)}
+        return self.tr_estado
+
+    def _tr_ativo(self):
+        return self.aba == "trofeus" and getattr(self, "tr_lbl", None) is not None and self.tr_lbl.winfo_exists()
+
+    def tela_trofeus(self):
+        self.limpar()
+        st = self._tr()
+        p, c = self.p, self.c
+        x0, y0, w, h = 48, 116, 864, 466
+        c.create_image(p.px(x0 + w / 2), p.px(y0 + h / 2), tags="view",
+                       image=p.ret(w, h, 20, PAINEL_RGB + (255,), outline=(255, 255, 255, 30), largura=1))
+        fonte = ctk.CTkFont(family=F_REG, size=13)
+        fonte_b = ctk.CTkFont(family=F_SEMI, size=13)
+        painel = ctk.CTkFrame(self.root, fg_color=PAINEL, corner_radius=0, width=w - 28, height=h - 28)
+        painel.grid_propagate(False)
+        painel.pack_propagate(False)
+        c.create_window(p.px(x0 + 14), p.px(y0 + 14), window=painel, anchor="nw", tags="view")
+        self.widgets.append(painel)
+        painel.grid_columnconfigure(1, weight=1)
+        painel.grid_rowconfigure(1, weight=1)
+
+        def botao(pai_, texto, cmd, tipo="normal"):
+            cores = {"normal": (BTN, BTN_HOVER, BRANCO), "azul": ("#0070D1", "#1888F0", BRANCO),
+                     "perigo": ("#3A1620", "#5A1E2C", "#FCA5A5")}[tipo]
+            return ctk.CTkButton(pai_, text=texto, command=cmd, height=34, corner_radius=17, font=fonte_b, width=0,
+                                 fg_color=cores[0], hover_color=cores[1], text_color=cores[2],
+                                 text_color_disabled="#6B7488")
+        self._tr_botao = botao
+
+        topo = ctk.CTkFrame(painel, fg_color="transparent")
+        topo.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 8))
+        ctk.CTkLabel(topo, text="Troféus do PS3", font=ctk.CTkFont(family=F_SEMI, size=15), text_color=BRANCO).pack(
+            side="left")
+        self.tr_usuario = None
+        if st["usuarios"] and len(st["usuarios"]) > 1:
+            nomes = [f"{n} ({u})" for u, n in st["usuarios"]]
+            atual = next((f"{n} ({u})" for u, n in st["usuarios"] if u == st["usuario"]), nomes[0])
+            self.tr_usuario = ctk.CTkOptionMenu(topo, values=nomes, command=self._tr_trocar_usuario, height=32,
+                                                fg_color=BTN, button_color=BTN_HOVER, font=fonte)
+            self.tr_usuario.set(atual)
+            self.tr_usuario.pack(side="left", padx=12)
+        self.tr_btn_ler = botao(topo, "⟳ Ler de novo", self.tr_ler)
+        self.tr_btn_ler.pack(side="right")
+        botao(topo, "Backups", self.tr_abrir_backups).pack(side="right", padx=6)
+
+        esq = ctk.CTkFrame(painel, fg_color="transparent", width=290)
+        esq.grid(row=1, column=0, sticky="nsew", padx=(8, 4))
+        esq.grid_propagate(False)
+        esq.grid_rowconfigure(0, weight=1)
+        esq.grid_columnconfigure(0, weight=1)
+        self.tr_lista_jogos = ctk.CTkScrollableFrame(esq, fg_color="#0B1426", corner_radius=12,
+                                                     scrollbar_button_color="#1E2A44",
+                                                     scrollbar_button_hover_color="#2A3A5E")
+        self.tr_lista_jogos.grid(row=0, column=0, sticky="nsew")
+
+        dir_ = ctk.CTkFrame(painel, fg_color="transparent")
+        dir_.grid(row=1, column=1, sticky="nsew", padx=(4, 8))
+        dir_.grid_rowconfigure(1, weight=1)
+        dir_.grid_columnconfigure(0, weight=1)
+        self.tr_cab = ctk.CTkLabel(dir_, text="", font=ctk.CTkFont(family=F_SEMI, size=14), text_color=BRANCO,
+                                   anchor="w", justify="left", wraplength=480)
+        self.tr_cab.grid(row=0, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self.tr_lista = ctk.CTkScrollableFrame(dir_, fg_color="#0B1426", corner_radius=12,
+                                               scrollbar_button_color="#1E2A44",
+                                               scrollbar_button_hover_color="#2A3A5E")
+        self.tr_lista.grid(row=1, column=0, sticky="nsew")
+
+        rod = ctk.CTkFrame(painel, fg_color="transparent")
+        rod.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 2))
+        rod.grid_columnconfigure(0, weight=1)
+        self.tr_lbl = ctk.CTkLabel(rod, text="", font=fonte, text_color=CINZA, anchor="w", justify="left",
+                                   wraplength=430)
+        self.tr_lbl.grid(row=0, column=0, sticky="ew")
+        acoes = ctk.CTkFrame(rod, fg_color="transparent")
+        acoes.grid(row=0, column=1, sticky="e")
+        self.tr_btn_restaurar = botao(acoes, "Desfazer", self.tr_restaurar)
+        self.tr_btn_restaurar.pack(side="left", padx=(0, 6))
+        self.tr_btn_todos = botao(acoes, "Marcar os que faltam", self.tr_marcar_todos)
+        self.tr_btn_todos.pack(side="left", padx=(0, 6))
+        self.tr_btn_destravar = botao(acoes, "Destravar", self.tr_destravar, "azul")
+        self.tr_btn_destravar.pack(side="left")
+
+        self._tr_desenhar_jogos()
+        self._tr_desenhar_trofeus()
+        self._tr_msg(*st["msg"])
+        self._tr_botoes()
+        if st["jogos"] is None and not st["lendo"] and self.estado_ps3 == "ok":
+            self.tr_ler()
+
+    def _tr_msg(self, texto, cor=CINZA):
+        self._tr()["msg"] = (texto, cor)
+        if self._tr_ativo():
+            self.tr_lbl.configure(text=texto, text_color=cor)
+
+    def _tr_botoes(self):
+        if not self._tr_ativo():
+            return
+        st = self._tr()
+        livre = not st["ocupado"] and not st["lendo"] and self.estado_ps3 == "ok"
+        info = st["lista"].get(st["sel"])
+        faltam = [t for t in info["trofeus"] if not t["destravado"]] if isinstance(info, dict) else []
+        self.tr_btn_ler.configure(state="normal" if livre else "disabled")
+        self.tr_btn_todos.configure(state="normal" if livre and faltam else "disabled")
+        n = len(st["marcados"])
+        self.tr_btn_destravar.configure(state="normal" if livre and n else "disabled",
+                                        text=f"Destravar {n}" if n else "Destravar")
+        tem_backup = False
+        if st["sel"] and st["usuario"]:
+            b = pasta_backup_trofeus(st["usuario"], st["sel"])
+            tem_backup = os.path.isdir(b) and any(d.is_dir() and not d.name.endswith("_desfeito")
+                                                  for d in os.scandir(b))
+        self.tr_btn_restaurar.configure(state="normal" if livre and tem_backup else "disabled")
+
+    def _tr_desenhar_jogos(self):
+        if not self._tr_ativo():
+            return
+        st = self._tr()
+        for w_ in self.tr_lista_jogos.winfo_children():
+            w_.destroy()
+        f_nome = ctk.CTkFont(family=F_SEMI, size=13)
+        f_sub = ctk.CTkFont(family=F_REG, size=11)
+        if st["jogos"] is None:
+            txt = "Lendo os troféus do PS3…" if st["lendo"] else (
+                "Conecte o PS3 para ver os troféus." if self.estado_ps3 != "ok" else "")
+            ctk.CTkLabel(self.tr_lista_jogos, text=txt, font=f_sub, text_color=CINZA, wraplength=240).pack(pady=20)
+            return
+        if not st["jogos"]:
+            ctk.CTkLabel(self.tr_lista_jogos, text="Nenhum jogo com troféus neste usuário.", font=f_sub,
+                         text_color=CINZA, wraplength=240).pack(pady=20)
+            return
+        for j in st["jogos"]:
+            sel = j["codigo"] == st["sel"]
+            linha = ctk.CTkFrame(self.tr_lista_jogos, fg_color="#1A3358" if sel else "#0F1B33", corner_radius=10,
+                                 cursor="hand2")
+            linha.pack(fill="x", pady=2, padx=(0, 4))
+            t = j["jogo"]
+            n = ctk.CTkLabel(linha, text=t if len(t) <= 32 else t[:31] + "…", font=f_nome, text_color=BRANCO,
+                             anchor="w")
+            n.pack(fill="x", padx=10, pady=(6, 0))
+            pct = int(j["ganhos"] * 100 / j["total"]) if j["total"] else 0
+            s = ctk.CTkLabel(linha, text=f"{j['ganhos']} de {j['total']} troféus  •  {pct}%", font=f_sub,
+                             text_color="#7FB2F0" if sel else CINZA_ESCURO, anchor="w")
+            s.pack(fill="x", padx=10, pady=(0, 6))
+            for w_ in (linha, n, s):
+                w_.bind("<Button-1>", lambda e, cod=j["codigo"]: self.tr_escolher(cod))
+
+    def _tr_desenhar_trofeus(self):
+        if not self._tr_ativo():
+            return
+        st = self._tr()
+        for w_ in self.tr_lista.winfo_children():
+            w_.destroy()
+        f_n = ctk.CTkFont(family=F_SEMI, size=13)
+        f_sub = ctk.CTkFont(family=F_REG, size=11)
+        cod = st["sel"]
+        if not cod:
+            self.tr_cab.configure(text="Escolha um jogo")
+            ctk.CTkLabel(self.tr_lista, text="Escolha um jogo à esquerda para ver e destravar os troféus.\n"
+                                             "Antes de mexer, o PSTudo guarda um backup no PC.",
+                         font=f_sub, text_color=CINZA, justify="center").pack(pady=30)
+            return
+        info = st["lista"].get(cod)
+        jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
+        self.tr_cab.configure(text=(jogo["jogo"] if jogo else cod) + f"   ({cod})")
+        if info is None:
+            ctk.CTkLabel(self.tr_lista, text="Lendo os troféus…", font=f_sub, text_color=CINZA).pack(pady=30)
+            return
+        if isinstance(info, Exception):
+            ctk.CTkLabel(self.tr_lista, text=f"Não consegui ler estes troféus.\n({str(info)[:100]})", font=f_sub,
+                         text_color="#F87171", justify="center").pack(pady=24)
+            return
+        cores = {1: "#7FD3F7", 2: "#F5C542", 3: "#C9D1DC", 4: "#D08A55"}
+        for t in info["trofeus"]:
+            linha = ctk.CTkFrame(self.tr_lista, fg_color="#0F1B33", corner_radius=10)
+            linha.pack(fill="x", pady=2, padx=(0, 4))
+            if t["destravado"]:
+                ctk.CTkLabel(linha, text="✓", width=24, font=f_n, text_color="#34D399").pack(side="left", padx=(10, 4))
+            else:
+                v = tk.BooleanVar(value=t["id"] in st["marcados"])
+                cb = ctk.CTkCheckBox(linha, text="", width=24, checkbox_width=18, checkbox_height=18, variable=v,
+                                     command=lambda i=t["id"], v=v: self._tr_marcar(i, v.get()))
+                cb.pack(side="left", padx=(10, 4))
+            col = ctk.CTkFrame(linha, fg_color="transparent")
+            col.pack(side="left", fill="x", expand=True, pady=6)
+            tipo = TIPOS_TROFEU.get(t["tipo"], "")
+            nome = t["nome"] + ("  (oculto)" if t["oculto"] else "")
+            topo = ctk.CTkFrame(col, fg_color="transparent")
+            topo.pack(fill="x")
+            ctk.CTkLabel(topo, text="● ", font=f_n, text_color=cores.get(t["tipo"], CINZA)).pack(side="left")
+            ctk.CTkLabel(topo, text=nome if len(nome) <= 48 else nome[:47] + "…", font=f_n, text_color=BRANCO,
+                         anchor="w").pack(side="left")
+            det = t["detalhe"]
+            sub = f"{tipo}  •  {det}" if det else tipo
+            ctk.CTkLabel(col, text=sub if len(sub) <= 80 else sub[:79] + "…", font=f_sub, text_color=CINZA,
+                         anchor="w", justify="left").pack(fill="x")
+            if t["destravado"]:
+                quando = time.strftime("%d/%m/%Y", time.localtime(tempo_unix(t["tempo"]))) if t["tempo"] else ""
+                ctk.CTkLabel(linha, text=("na PSN" if t["sync"] else "ganho") + (f"\n{quando}" if quando else ""),
+                             font=f_sub, text_color="#34D399" if t["sync"] else "#7FB2F0").pack(side="right", padx=12)
+
+    def _tr_marcar(self, i, on):
+        st = self._tr()
+        (st["marcados"].add if on else st["marcados"].discard)(i)
+        self._tr_botoes()
+
+    # ---------------- ações
+    def _tr_trocar_usuario(self, valor):
+        st = self._tr()
+        for u, n in st["usuarios"] or []:
+            if valor == f"{n} ({u})":
+                st["usuario"] = u
+        st["jogos"], st["sel"], st["lista"], st["marcados"] = None, None, {}, set()
+        self.tr_ler(manter_usuarios=True)
+
+    def tr_ler(self, manter_usuarios=False):
+        st = self._tr()
+        if st["lendo"] or self.estado_ps3 != "ok":
+            return
+        st["lendo"] = True
+        st["jogos"] = None
+        if not manter_usuarios:
+            st["lista"], st["marcados"] = {}, set()
+        self._tr_desenhar_jogos()
+        self._tr_botoes()
+        self._tr_msg("Lendo os troféus do PS3…")
+
+        def avisar(t):
+            self.fila.put(("cb", lambda t=t: self._tr_msg(t)))
+
+        def trabalho(ftp):
+            usuarios = st["usuarios"] if manter_usuarios and st["usuarios"] else listar_usuarios_ps3(ftp)
+            u = st["usuario"] if st["usuario"] in [x for x, _ in usuarios] else (usuarios[0][0] if usuarios else None)
+            jogos = listar_trofeus_ps3(ftp, u, avisar) if u else []
+            return usuarios, u, jogos
+
+        def ok(r):
+            usuarios, u, jogos = r
+            mudou = st["usuarios"] != usuarios
+            st["usuarios"], st["usuario"], st["jogos"] = usuarios, u, jogos
+            if not usuarios:
+                self._tr_msg("Não achei usuários no PS3.", "#FBBF24")
+            else:
+                self._tr_msg(f"{len(jogos)} jogo(s) com troféus. Depois de destravar, NÃO sincronize com a PSN "
+                             "(a Sony pode banir a conta).", "#FBBF24")
+            if mudou and self._tr_ativo():
+                self.tela_trofeus()
+            else:
+                self._tr_desenhar_jogos()
+                self._tr_desenhar_trofeus()
+
+        def erro(e):
+            st["jogos"] = []
+            self._tr_msg(f"Não consegui ler os troféus ({str(e)[:60]})", "#F87171")
+            self._tr_desenhar_jogos()
+
+        def fim():
+            st["lendo"] = False
+            self._tr_botoes()
+        self.em_thread(trabalho, ok, erro, fim)
+
+    def tr_escolher(self, cod, recarregar=False):
+        st = self._tr()
+        if st["sel"] != cod:
+            st["marcados"] = set()
+        st["sel"] = cod
+        jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
+        if jogo and (recarregar or cod not in st["lista"] or isinstance(st["lista"].get(cod), Exception)):
+            st["lista"].pop(cod, None)
+
+            def trabalho(ftp):
+                arqs = {"TROPUSR.DAT": ler_bytes_remoto(ftp, f"{jogo['pasta']}/TROPUSR.DAT")}
+                for nome in ("TROP_17.SFM", "TROP_07.SFM", "TROP.SFM", "TROPCONF.SFM"):   # nomes em português
+                    try:
+                        arqs[nome] = ler_bytes_remoto(ftp, f"{jogo['pasta']}/{nome}")
+                        break
+                    except ftplib.all_errors:
+                        continue
+                trofeus, nome_jogo = resumo_trofeus(arqs)
+                return {"trofeus": trofeus, "jogo": nome_jogo}
+
+            def ok(r):
+                st["lista"][cod] = r
+                jogo["ganhos"] = sum(1 for t in r["trofeus"] if t["destravado"])
+                self._tr_desenhar_trofeus()
+                self._tr_desenhar_jogos()
+                self._tr_botoes()
+
+            def erro(e):
+                st["lista"][cod] = e
+                self._tr_desenhar_trofeus()
+            self.em_thread(trabalho, ok, erro)
+        self._tr_desenhar_jogos()
+        self._tr_desenhar_trofeus()
+        self._tr_botoes()
+
+    def tr_marcar_todos(self):
+        st = self._tr()
+        info = st["lista"].get(st["sel"])
+        if not isinstance(info, dict):
+            return
+        st["marcados"] = {t["id"] for t in info["trofeus"] if not t["destravado"]}
+        self._tr_desenhar_trofeus()
+        self._tr_botoes()
+
+    def tr_destravar(self):
+        st = self._tr()
+        cod, ids, u = st["sel"], sorted(st["marcados"]), st["usuario"]
+        jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
+        if st["ocupado"] or not ids or not jogo:
+            return
+        st["ocupado"] = True
+        self._tr_botoes()
+        self._tr_msg("Fazendo backup e conferindo a assinatura dos troféus…")
+
+        def trabalho(ftp):
+            arqs = baixar_pasta_trofeu(ftp, jogo["pasta"])
+            for nome in ("PARAM.PFD", "TROPUSR.DAT", "TROPTRNS.DAT"):
+                if nome not in arqs:
+                    raise ErroTrofeu(f"{nome} não existe nesta pasta")
+            pasta = os.path.join(pasta_backup_trofeus(u, cod), time.strftime("%Y-%m-%d_%H-%M-%S"))
+            os.makedirs(pasta, exist_ok=True)
+            for nome, dados in arqs.items():                  # backup antes de tudo
+                with open(os.path.join(pasta, nome), "wb") as f:
+                    f.write(dados)
+            novos, n = destravar_trofeus(arqs, ids)
+            if not n:
+                return 0
+            self.fila.put(("cb", lambda: self._tr_msg("Gravando no PS3…")))
+            gravar_trofeus_ps3(ftp, jogo["pasta"], novos, arqs)
+            return n
+
+        def ok(n):
+            st["marcados"] = set()
+            if n:
+                self._tr_msg(f"✓ {n} troféu(s) destravado(s). Reinicie o PS3 para aparecerem. "
+                             "Não sincronize com a PSN.", "#34D399")
+            else:
+                self._tr_msg("Esses troféus já estavam destravados.", CINZA)
+            self.tr_escolher(cod, recarregar=True)
+
+        def erro(e):
+            self._tr_msg(f"Não destravei: {str(e)[:150]}", "#F87171")
+
+        def fim():
+            st["ocupado"] = False
+            self._tr_botoes()
+        self.em_thread(trabalho, ok, erro, fim)
+
+    def tr_restaurar(self):
+        """Volta os troféus do jogo escolhido para o backup mais recente."""
+        st = self._tr()
+        cod, u = st["sel"], st["usuario"]
+        jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
+        base = pasta_backup_trofeus(u, cod) if u and cod else None
+        if st["ocupado"] or not jogo or not base or not os.path.isdir(base):
+            return
+        backups = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))
+                         and not d.endswith("_desfeito"))
+        if not backups:
+            return
+        escolhido = os.path.join(base, backups[-1])    # o mais recente = como estava antes do último destravar
+        st["ocupado"] = True
+        self._tr_botoes()
+        self._tr_msg("Restaurando o backup…")
+
+        def trabalho(ftp):
+            antes = {}
+            for nome in ARQS_TROFEU_MUDAM:
+                with open(os.path.join(escolhido, nome), "rb") as f:
+                    antes[nome] = f.read()
+            atuais = {n: ler_bytes_remoto(ftp, f"{jogo['pasta']}/{n}") for n in ARQS_TROFEU_MUDAM}
+            gravar_trofeus_ps3(ftp, jogo["pasta"], antes, atuais)
+            os.rename(escolhido, escolhido + "_desfeito")     # o próximo "Desfazer" volta mais um passo
+            return backups[-1]
+
+        def ok(qual):
+            self._tr_msg(f"✓ Desfeito: os troféus voltaram a como estavam em {qual.replace('_', ' ')}. "
+                         "Reinicie o PS3.", "#34D399")
+            self.tr_escolher(cod, recarregar=True)
+
+        def erro(e):
+            self._tr_msg(f"Não consegui restaurar: {str(e)[:120]}", "#F87171")
+
+        def fim():
+            st["ocupado"] = False
+            self._tr_botoes()
+        self.em_thread(trabalho, ok, erro, fim)
+
+    def tr_abrir_backups(self):
+        pasta = os.path.join(os.path.expanduser("~"), "PSTudo", "backup_trofeus")
+        os.makedirs(pasta, exist_ok=True)
+        try:
+            os.startfile(pasta)
+        except (AttributeError, OSError):
+            self._tr_msg(f"Backups em: {pasta}")
+
+
 def tecla_tk_para_nome(keysym):
     """Converte a tecla do Tk para o nome usado pelo pygame. None = tecla não permitida."""
     k = keysym.lower()
@@ -6002,7 +6927,7 @@ def nome_bonito(tecla):
 
 
 # =============================================================== app
-class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
+class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, Trofeus):
     def __init__(self):
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
@@ -6134,7 +7059,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
 
     def atualizar_status(self, estado):
         self.estado_ps3 = estado
-        textos = {"ok": "PS3 conectado", "busca": "Procurando o PS3…", "erro": "PS3 não encontrado"}
+        textos = {"ok": "PS3 conectado", "busca": "Procurando…", "erro": "PS3 offline"}
         cores = {"ok": "#34D399", "busca": "#FBBF24", "erro": "#F87171"}
         p = self.p
         cx, cy, r = self._pill_x - self.pill_w / 2 + 20, 56, 4.5
@@ -6146,6 +7071,11 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
             self.btn_enviar.set_ativo(estado == "ok" and pronto)
         if estado == "ok" and getattr(self, "aba", "") == "arquivos" and getattr(self, "fm_desconectado", False):
             self.fm_listar()
+        if getattr(self, "aba", "") == "trofeus" and self._tr_ativo():
+            self._tr_botoes()
+            st = self._tr()
+            if estado == "ok" and st["jogos"] is None and not st["lendo"]:
+                self.tr_ler()
         if getattr(self, "aba", "") == "updates" and self._up_ativo():
             self._up_botoes()
             st = self._up()
@@ -6430,7 +7360,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
 
     def _mostrar_instalando(self):
         i, n, nome = self.instalando_info
-        self._atualizar_aba_envio(1.0, "Instalando…")
+        self._atualizar_aba_envio(1.0, "Instal…")
         if not getattr(self, "vendo_envio", False):
             return
         c = self.c
@@ -6494,12 +7424,12 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto):
             self.envio_pendente = (tipo, dados)
             if tipo == "fim":
                 self._som_fim()
-                self._atualizar_aba_envio(None, "Instalado ✓" if dados[3] else "Enviado ✓")
+                self._atualizar_aba_envio(None, "Pronto ✓")
                 self._aviso_app(f"{dados[3]} pacote(s) instalado(s) no PS3!" if dados[3] else
                                 f"{dados[0]} {'jogo enviado' if dados[0] == 1 else 'jogos enviados'} para o PS3!")
             else:
-                self._atualizar_aba_envio(None, "Erro no envio")
-                self._aviso_app("O envio parou. Abra a aba Enviar jogos para ver.", "#F87171")
+                self._atualizar_aba_envio(None, "Erro ✕")
+                self._aviso_app("O envio parou. Abra a aba Enviar para ver.", "#F87171")
         elif tipo == "fim":
             if self.enviando:      # não toca de novo ao abrir um resultado que ficou pendente
                 self._som_fim()
