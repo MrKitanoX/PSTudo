@@ -36,7 +36,7 @@ public class TabTrofeus {
     static final String HOME = "/dev_hdd0/home";
     static final String[] MUDAM = {"TROPUSR.DAT", "TROPTRNS.DAT", "PARAM.PFD"};
 
-    static class Jogo { String pasta, codigo, nome; int total, ganhos; }
+    static class Jogo { String pasta, codigo, nome, erro = ""; int total, ganhos; }
 
     private final MainActivity a;
     private List<String[]> usuarios = null;      // {id, nome}
@@ -133,7 +133,8 @@ public class TabTrofeus {
             n.setEllipsize(android.text.TextUtils.TruncateAt.END);
             l.addView(n);
             int pct = j.total > 0 ? j.ganhos * 100 / j.total : 0;
-            l.addView(Ui.texto(a, j.ganhos + " de " + j.total + " troféus  •  " + pct + "%", 12, Ui.CINZA_ESCURO, Ui.NORMAL));
+            l.addView(Ui.texto(a, j.erro.isEmpty() ? j.ganhos + " de " + j.total + " troféus  •  " + pct + "%"
+                    : "Não consegui ler: " + j.erro, 12, j.erro.isEmpty() ? Ui.CINZA_ESCURO : Ui.VERMELHO, Ui.NORMAL));
             l.setClickable(true);
             l.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { escolher(j.codigo, false); } });
             lista.addView(l, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
@@ -319,11 +320,17 @@ public class TabTrofeus {
                             Jogo j = new Jogo();
                             j.pasta = base + "/" + it.nome;
                             j.codigo = it.nome;
-                            try {
+                            try {       // uma pasta que não dá para ler entra na lista com o motivo
                                 byte[] usr = f.baixar(j.pasta + "/TROPUSR.DAT");
                                 j.total = Trofeus.total(usr);
                                 j.ganhos = Trofeus.ganhos(usr);
-                            } catch (IOException e) { continue; }
+                            } catch (Ftp.Erro e) {
+                                j.erro = "sem TROPUSR.DAT";
+                            } catch (Trofeus.Erro e) {
+                                j.erro = e.getMessage();
+                            } catch (RuntimeException e) {
+                                j.erro = String.valueOf(e);
+                            }
                             j.nome = it.nome;
                             for (String sfm : new String[]{"TROPCONF.SFM", "TROP.SFM"}) {
                                 try {
@@ -361,7 +368,8 @@ public class TabTrofeus {
         if (!cod.equals(sel)) marcados.clear();
         sel = cod;
         final Jogo j = jogo(cod);
-        if (j != null && (deNovo || !listas.containsKey(cod) || listas.get(cod) instanceof IOException)) {
+        if (j != null && !j.erro.isEmpty() && !deNovo) listas.put(cod, new IOException(j.erro));
+        else if (j != null && (deNovo || !listas.containsKey(cod) || listas.get(cod) instanceof IOException)) {
             listas.remove(cod);
             a.bg(new Runnable() {
                 public void run() {
@@ -381,6 +389,8 @@ public class TabTrofeus {
                         r = l;
                     } catch (IOException e) {
                         r = e;
+                    } catch (RuntimeException e) {
+                        r = new IOException(String.valueOf(e));
                     } finally {
                         if (f != null) f.fechar();
                     }

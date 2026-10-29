@@ -1001,7 +1001,7 @@ class Extras:
         self.fm_lbl_path = ctk.CTkLabel(topo, text=legivel(self.fm_path), font=ctk.CTkFont(family=F_SEMI, size=15),
                                         text_color=BRANCO, anchor="w")
         self.fm_lbl_path.pack(side="left", padx=12, fill="x", expand=True)
-        botao(topo, "⟳", self.fm_listar, 40).pack(side="right")
+        botao(topo, "↻", self.fm_listar, 40).pack(side="right")
         for nome, cam in reversed([("HD", "/dev_hdd0"), ("Jogos", "/dev_hdd0/GAMES"), ("ISOs", "/dev_hdd0/PS3ISO"),
                                    ("Plugins", "/dev_hdd0/plugins"), ("Pendrive", "/dev_usb000")]):
             botao(topo, nome, lambda c_=cam: self.fm_ir(c_)).pack(side="right", padx=(0, 6))
@@ -1917,7 +1917,7 @@ def _carregar_no_slot(ip, caminho, slot):
         # em vez de dar erro, confere se ele já está carregado
         if _esperar_plugin(ip, caminho, 25) is False:
             raise RuntimeError("O PS3 não respondeu a tempo e o plugin não apareceu como ativo. "
-                               "Espere uns segundos e clique em ⟳ Atualizar para conferir.") from None
+                               "Espere uns segundos e clique em Atualizar para conferir.") from None
     except urllib.error.HTTPError as e:
         if e.code not in (400, 404, 501):
             raise
@@ -2851,7 +2851,7 @@ class Console:
         self.cn_lista.pack(fill="both", expand=True, padx=6, pady=(8, 0))
         rod = ctk.CTkFrame(pl, fg_color="transparent")
         rod.pack(fill="x", padx=16, pady=(8, 12))
-        self.cn_btn_atualizar = btn(rod, "⟳  Atualizar", self.carregar_console, largura=120)
+        self.cn_btn_atualizar = btn(rod, "Atualizar", self.carregar_console, largura=120)
         self.cn_btn_atualizar.pack(side="right")          # primeiro: o texto longo não empurra o botão
         self.cn_status = ctk.CTkLabel(rod, text="", font=f_txt, text_color=CINZA, anchor="w", justify="left",
                                       wraplength=320)
@@ -5255,7 +5255,7 @@ class Updates:
         self.up_campo.pack(side="left")
         self.up_campo.bind("<Return>", lambda e: self.up_buscar_codigo())
         botao(topo, "Buscar updates", self.up_buscar_codigo).pack(side="left", padx=(6, 0))
-        self.up_btn_ler = botao(topo, "⟳ Ler jogos do PS3", self.up_ler_jogos)
+        self.up_btn_ler = botao(topo, "Ler jogos do PS3", self.up_ler_jogos)
         self.up_btn_ler.pack(side="right")
 
         # ---- esquerda: jogos do PS3
@@ -6465,7 +6465,9 @@ def listar_usuarios_ps3(ftp):
 
 
 def listar_trofeus_ps3(ftp, usuario, avisar=None):
-    """Jogos com troféus do usuário: [{pasta, codigo, jogo, total, ganhos}]."""
+    """Jogos com troféus do usuário: [{pasta, codigo, jogo, total, ganhos, erro}].
+    Uma pasta que não dá para ler entra na lista com o motivo (em vez de sumir)."""
+    import html
     import re
     base = f"{HOME_PS3}/{usuario}/trophy"
     r = []
@@ -6479,11 +6481,6 @@ def listar_trofeus_ps3(ftp, usuario, avisar=None):
         pasta = f"{base}/{nome}"
         if avisar:
             avisar(f"Lendo {nome}…")
-        try:
-            usr = TropUsr(ler_bytes_remoto(ftp, f"{pasta}/TROPUSR.DAT"))
-        except (ftplib.all_errors, ErroTrofeu):
-            continue
-        ganhos = sum(1 for i in range(usr.total) if usr.info(i)["destravado"])
         jogo = ""
         for sfm in ("TROPCONF.SFM", "TROP.SFM"):
             try:
@@ -6494,9 +6491,17 @@ def listar_trofeus_ps3(ftp, usuario, avisar=None):
             if m:
                 jogo = m.group(1).decode("utf-8", "ignore").strip()
                 break
-        import html
-        r.append({"pasta": pasta, "codigo": nome, "jogo": html.unescape(jogo) or nome, "total": usr.total,
-                  "ganhos": ganhos})
+        item = {"pasta": pasta, "codigo": nome, "jogo": html.unescape(jogo) or nome, "total": 0, "ganhos": 0,
+                "erro": ""}
+        try:
+            usr = TropUsr(ler_bytes_remoto(ftp, f"{pasta}/TROPUSR.DAT"))
+            item["total"] = usr.total
+            item["ganhos"] = sum(1 for i in range(usr.total) if usr.info(i)["destravado"])
+        except ftplib.all_errors as e:
+            item["erro"] = f"sem TROPUSR.DAT ({str(e)[:40]})"
+        except (ErroTrofeu, struct.error, IndexError, ValueError) as e:
+            item["erro"] = str(e)[:80] or type(e).__name__
+        r.append(item)
     return sorted(r, key=lambda x: sem_acento(x["jogo"]).lower())
 
 
@@ -6598,7 +6603,7 @@ class Trofeus:
                                                 fg_color=BTN, button_color=BTN_HOVER, font=fonte)
             self.tr_usuario.set(atual)
             self.tr_usuario.pack(side="left", padx=12)
-        self.tr_btn_ler = botao(topo, "⟳ Ler de novo", self.tr_ler)
+        self.tr_btn_ler = botao(topo, "Ler de novo", self.tr_ler)
         self.tr_btn_ler.pack(side="right")
         botao(topo, "Backups", self.tr_abrir_backups).pack(side="right", padx=6)
 
@@ -6698,8 +6703,10 @@ class Trofeus:
                              anchor="w")
             n.pack(fill="x", padx=10, pady=(6, 0))
             pct = int(j["ganhos"] * 100 / j["total"]) if j["total"] else 0
-            s = ctk.CTkLabel(linha, text=f"{j['ganhos']} de {j['total']} troféus  •  {pct}%", font=f_sub,
-                             text_color="#7FB2F0" if sel else CINZA_ESCURO, anchor="w")
+            txt_sub = (f"Não consegui ler: {j['erro'][:34]}" if j.get("erro")
+                       else f"{j['ganhos']} de {j['total']} troféus  •  {pct}%")
+            s = ctk.CTkLabel(linha, text=txt_sub, font=f_sub, anchor="w",
+                             text_color="#F87171" if j.get("erro") else ("#7FB2F0" if sel else CINZA_ESCURO))
             s.pack(fill="x", padx=10, pady=(0, 6))
             for w_ in (linha, n, s):
                 w_.bind("<Button-1>", lambda e, cod=j["codigo"]: self.tr_escolher(cod))
@@ -6824,7 +6831,9 @@ class Trofeus:
             st["marcados"] = set()
         st["sel"] = cod
         jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
-        if jogo and (recarregar or cod not in st["lista"] or isinstance(st["lista"].get(cod), Exception)):
+        if jogo and jogo.get("erro") and not recarregar:
+            st["lista"][cod] = ErroTrofeu(jogo["erro"])
+        elif jogo and (recarregar or cod not in st["lista"] or isinstance(st["lista"].get(cod), Exception)):
             st["lista"].pop(cod, None)
 
             def trabalho(ftp):
@@ -7235,7 +7244,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
 
     def _botao_xmb_canto(self):
         """Botão pequeno no canto de baixo: atualizar a lista de jogos do XMB quando quiser."""
-        b = Botao(self, W - 24 - 70, 556, 140, 32, "⟳  Atualizar XMB", lambda: self._xmb_canto(b), "secundario",
+        b = Botao(self, W - 24 - 70, 556, 140, 32, "Atualizar XMB", lambda: self._xmb_canto(b), "secundario",
                   tamanho_fonte=12)
         self.btn_xmb = b
 
@@ -7258,7 +7267,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
                 msg, cor = f"Não consegui atualizar o XMB ({str(e)[:50]}).", "#F87171"
 
             def fim():
-                b.set_texto("⟳  Atualizar XMB")
+                b.set_texto("Atualizar XMB")
                 b.set_ativo(True)
                 self._aviso_app(msg, cor)
             self.fila.put(("cb", fim))
