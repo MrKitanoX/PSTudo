@@ -95,6 +95,10 @@ SOFTWARE.
 
 ## Não incluídos (baixados ou usados no console)
 
+- **FFmpeg** (https://ffmpeg.org), usado para gravar a aba Tela: o `ffmpeg.exe` do pacote `imageio-ffmpeg`
+  (https://github.com/imageio/imageio-ffmpeg, BSD-2-Clause) é baixado do PyPI na primeira gravação, com o
+  SHA-256 conferido. Esse build do FFmpeg é distribuído sob a GPL (inclui o x264).
+
 - **XPAD Revolution** (GabaRSk): baixado do GitHub oficial quando o usuário clica em "Instalar".
 - **webMAN MOD** (aldostools): instalado pelo usuário no PS3.
 

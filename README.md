@@ -29,7 +29,7 @@
 | **Controle remoto** | Botão 🎮 no topo: liga e desliga quando quiser o uso do controle ligado no PC (Xbox/XInput, DualShock 4, DualSense…) para controlar o PS3 pela rede, pelo controle virtual do webMAN MOD. Funciona no XMB e nos jogos. Limite do webMAN: o analógico vai inclinado até o fim (8 direções), um por vez. |
 | **Troféus** | Lista os jogos com troféus de cada usuário do PS3, com nome, tipo e o que já foi ganho, e destrava localmente os troféus marcados. O botão **Data e hora** muda a data e a hora dos troféus ganhos que ainda não foram para a PSN, só no console. Antes de gravar, faz backup no PC (ou no celular) e confere se a assinatura atual dos troféus bate com o cálculo do PSTudo; se não bater, não mexe em nada. O botão **Desfazer** volta ao backup. **Não sincronize com a PSN depois de destravar**: a Sony pode banir a conta. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution) e deixá-lo ligando sozinho 15 s depois do HEN (pelo `autoexec.bat` do webMAN), ajustar o analógico, ver e registrar controles no `xpad_devices.txt` (registrados à esquerda, disponíveis no PC à direita) e desinstalar o XPAD por completo se algo der errado. |
-| **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, sincronizada com o monitor (sem rasgos), com **FSR 1** completo (ampliação EASU + nitidez RCAS), correção automática da faixa de cor (RGB limitado do PS3) e captura sem compressão quando a placa aguenta. A **fluidez com IA** usa a rede neural **RIFE** rodando na própria placa de vídeo para criar os quadros que faltam (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor). Não trava quando você transmite no Discord ou no OBS. |
+| **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, sincronizada com o monitor (sem rasgos), com **FSR 1** completo (ampliação EASU + nitidez RCAS), correção automática da faixa de cor (RGB limitado do PS3) e captura sem compressão quando a placa aguenta. O botão ⏺ **grava** o que chega da placa (vídeo e áudio) num `.mp4` em `Vídeos\PSTudo`, usando o codificador da placa de vídeo (NVIDIA NVENC, AMD AMF ou Intel Quick Sync). A placa pode ser lida pelo **Media Foundation**, a leitura mais nova do Windows, com menos atraso. A **fluidez com IA** usa a rede neural **RIFE** rodando na própria placa de vídeo para criar os quadros que faltam (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor). Não trava quando você transmite no Discord ou no OBS. |
 
 <p align="center">
   <img src="docs/imagens/enviando.png" width="400" alt="Enviando jogos">
@@ -74,7 +74,8 @@ A janela pode ser maximizada: a interface aumenta junto.
 |---|---|
 | `F` | Liga e desliga o FSR (na tela cheia da aba Tela) |
 | `I` | Troca a fluidez com IA (na tela cheia da aba Tela) |
-| `Ctrl` + `Shift` + `F` / `I` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
+| `R` | Começa e para a gravação (aba Tela) |
+| `Ctrl` + `Shift` + `F` / `I` / `R` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
 | `Esc` | Sai da tela cheia |
 
 ## Rodar pelo código ou gerar o .exe
@@ -97,6 +98,9 @@ A placa de captura só funciona com um programa por vez. Feche o OBS ou qualquer
 
 **A transmissão no Discord trava quando a tela cheia está em foco.**
 Deixe ligada a opção **Compatível com Discord e OBS** (aba Tela → Imagem). Ela já vem ligada. Para trocar o FSR ou a interpolação sem tirar o foco do Discord, use `Ctrl` + `Shift` + a tecla do atalho.
+
+**Onde ficam as gravações? Por que baixou algo ao gravar a primeira vez?**
+Em `Vídeos\PSTudo`. Para gravar, o PSTudo usa o **ffmpeg**, que é baixado uma única vez (cerca de 31 MB, do pacote `imageio-ffmpeg` no PyPI, com o SHA-256 conferido) e fica em `PSTudo\ffmpeg` na sua pasta de usuário. A gravação é do vídeo da placa como ele chega (sem FSR nem fluidez), em 60 quadros por segundo.
 
 **Posso transformar qualquer PKG em ISO?**
 Não. Só jogos de disco que foram empacotados em PKG. Jogos da PSN (IDs que começam com `NP`) não têm versão de disco, e atualizações não são o jogo completo. Nesses casos, instale o PKG pelo PS3.

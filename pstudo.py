@@ -3662,6 +3662,7 @@ INTERP_NATIVO = -1
 INTERP_OPCOES = {"Desligada": 0, "x2": 2, "x3": 3, "x4": 4, "x5": 5, "x6": 6, "Nativo": INTERP_NATIVO}
 FAIXAS_COR = ("Automática", "Limitada", "Completa")
 FORMATOS_CAPTURA = ("Automático", "Sem compressão", "MJPEG")
+LEITURAS_CAPTURA = ("Automática", "Media Foundation", "DirectShow")
 NIVEIS_IA = {"Automática": None, "Leve": 640, "Equilibrada": 960, "Alta": 1280}
 LARGURAS_IA = (1280, 960, 640)
 
@@ -3675,8 +3676,9 @@ class TelaCheiaGPU:
     que faltam entre dois quadros diferentes do jogo, numa linha do tempo com atraso constante."""
 
     def __init__(self, captura, fsr, ao_fechar, ao_mudar_fsr=None, interp_modo=0, ao_mudar_interp=None,
-                 atalhos=None, compativel=True, opcoes=None):
+                 atalhos=None, compativel=True, opcoes=None, ao_gravar=None):
         self.cap, self.fsr, self.ao_fechar, self.ao_mudar_fsr = captura, fsr, ao_fechar, ao_mudar_fsr
+        self.ao_gravar = ao_gravar
         self.interp_modo, self.ao_mudar_interp = interp_modo, ao_mudar_interp
         self.atalhos = atalhos or {"fsr": "f", "interp": "i"}
         self.opcoes = dict(nitidez=0.5, faixa="Automática", vsync=True, ia="Automática")
@@ -3721,6 +3723,10 @@ class TelaCheiaGPU:
     def definir_opcoes(self, **op):
         self.opcoes.update(op)
 
+    def pedir_gravacao(self):
+        if self.ao_gravar:
+            self.ao_gravar()
+
     def alternar_fsr(self):
         self.definir_fsr(not self.fsr)
         if self.ao_mudar_fsr:
@@ -3741,9 +3747,9 @@ class TelaCheiaGPU:
         self._thread_atalhos = kernel32.GetCurrentThreadId()
         msg = wintypes.MSG()
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # cria a fila de mensagens desta thread
-        acoes = {1: self.alternar_fsr, 2: self.proxima_interp}
+        acoes = {1: self.alternar_fsr, 2: self.proxima_interp, 3: self.pedir_gravacao}
         usados = []
-        for id_, nome in ((1, "fsr"), (2, "interp")):
+        for id_, nome in ((1, "fsr"), (2, "interp"), (3, "gravar")):
             vk = tecla_para_vk(self.atalhos.get(nome, ""))
             if vk and user32.RegisterHotKey(None, id_, 0x0002 | 0x0004 | 0x4000, vk):  # Ctrl+Shift, sem repetir
                 usados.append(id_)
@@ -4085,6 +4091,8 @@ class TelaCheiaGPU:
                         self.alternar_fsr()
                     elif nome == self.atalhos.get("interp"):
                         self.proxima_interp()
+                    elif nome == self.atalhos.get("gravar"):
+                        self.pedir_gravacao()
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     agora = time.time()
                     if agora - ult_clique < 0.35:
@@ -4336,6 +4344,277 @@ def escolher_padrao(nomes):
     return nomes[0] if nomes else None
 
 
+def listar_placas_mf():
+    """Nomes das entradas de vídeo na ordem do Media Foundation (a mesma que o OpenCV usa com CAP_MSMF)."""
+    if not WIN:
+        return []
+    import ctypes
+    import uuid
+    from ctypes import POINTER, byref, c_uint32, c_void_p, c_wchar_p
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_ushort), ("d3", ctypes.c_ushort),
+                    ("d4", ctypes.c_ubyte * 8)]
+
+    def guid(texto):
+        u = uuid.UUID(texto)
+        g = GUID(u.fields[0], u.fields[1], u.fields[2])
+        g.d4[:] = list(u.bytes[8:])
+        return g
+
+    def metodo(ptr, indice, *tipos):
+        tabela = ctypes.cast(ptr, POINTER(POINTER(c_void_p))).contents
+        return ctypes.WINFUNCTYPE(ctypes.HRESULT, c_void_p, *tipos)(tabela[indice])
+
+    def soltar(ptr):
+        tabela = ctypes.cast(ptr, POINTER(POINTER(c_void_p))).contents
+        ctypes.WINFUNCTYPE(c_uint32, c_void_p)(tabela[2])(ptr)
+
+    tipo_fonte = guid("c60ac5fe-252a-478f-a0ef-bc8fa5f7cad3")    # MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE
+    captura_video = guid("8ac3587a-4ae7-42d8-99e0-0a6013eef90f")  # ..._SOURCE_TYPE_VIDCAP_GUID
+    nome_amigavel = guid("60d0e559-52f8-4fa2-bbce-acdb34a8ec01")  # MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME
+    try:
+        ole32, mfplat, mf = ctypes.windll.ole32, ctypes.windll.mfplat, ctypes.windll.mf
+        ole32.CoInitializeEx(None, 0)
+        mfplat.MFStartup(0x00020070, 0)
+        attrs = c_void_p()
+        mfplat.MFCreateAttributes(byref(attrs), 1)
+        metodo(attrs, 24, POINTER(GUID), POINTER(GUID))(attrs, byref(tipo_fonte), byref(captura_video))  # SetGUID
+        lista, n = POINTER(c_void_p)(), c_uint32()
+        mf.MFEnumDeviceSources(attrs, byref(lista), byref(n))
+        nomes = []
+        for i in range(n.value):
+            ativ = lista[i]
+            texto, tam = c_wchar_p(), c_uint32()
+            try:
+                metodo(ativ, 13, POINTER(GUID), POINTER(c_wchar_p), POINTER(c_uint32))(   # GetAllocatedString
+                    ativ, byref(nome_amigavel), byref(texto), byref(tam))
+                nomes.append(texto.value or "")
+                ole32.CoTaskMemFree(texto)
+            except OSError:
+                nomes.append("")
+            soltar(ativ)
+        ole32.CoTaskMemFree(lista)
+        soltar(attrs)
+        return nomes
+    except Exception:
+        return []
+
+
+# =============================================================== gravação (ffmpeg com o codificador da placa de vídeo)
+FFMPEG_PYPI = ("https://pypi.org/pypi/imageio-ffmpeg/0.7.0/json", "win_amd64",
+               "7a22b45f60321d4172bdf2bc61f716bce4c81b85727bd59c7c7e371055a6a440")
+CODIFICADORES = (("h264_nvenc", "NVIDIA NVENC", ["-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "19", "-b:v", "0"]),
+                 ("h264_amf", "AMD AMF", ["-quality", "quality", "-rc", "cqp", "-qp_i", "19", "-qp_p", "21"]),
+                 ("h264_qsv", "Intel Quick Sync", ["-global_quality", "21"]),
+                 ("libx264", "processador (x264)", ["-preset", "veryfast", "-crf", "20"]))
+
+
+def pasta_ffmpeg():
+    return os.path.join(os.path.expanduser("~"), "PSTudo", "ffmpeg")
+
+
+def obter_ffmpeg(progresso=None):
+    """Caminho do ffmpeg. No Windows, baixa na primeira vez (pacote imageio-ffmpeg do PyPI, SHA-256 conferido)."""
+    import shutil
+    if not WIN:
+        achado = shutil.which("ffmpeg")
+        if achado:
+            return achado
+    destino = os.path.join(pasta_ffmpeg(), "ffmpeg.exe" if WIN else "ffmpeg")
+    if os.path.exists(destino):
+        return destino
+    import hashlib
+    import io
+    import zipfile
+    url_json, plataforma, sha_esperado = FFMPEG_PYPI
+    if not WIN:
+        plataforma = "manylinux"
+    with urllib.request.urlopen(url_json, timeout=30) as r:
+        info = json.load(r)
+    arq = next(u for u in info["urls"] if plataforma in u["filename"])
+    if WIN and arq["digests"]["sha256"] != sha_esperado:
+        raise RuntimeError("o pacote do ffmpeg mudou no PyPI; atualize o PSTudo")
+    dados = bytearray()
+    with urllib.request.urlopen(arq["url"], timeout=60) as r:
+        total = int(r.headers.get("Content-Length") or arq["size"])
+        while True:
+            pedaco = r.read(1 << 20)
+            if not pedaco:
+                break
+            dados += pedaco
+            if progresso:
+                progresso(len(dados), total)
+    if hashlib.sha256(dados).hexdigest() != arq["digests"]["sha256"]:
+        raise RuntimeError("o download do ffmpeg veio corrompido")
+    with zipfile.ZipFile(io.BytesIO(bytes(dados))) as z:
+        nome = next(n for n in z.namelist() if "/binaries/ffmpeg" in n)
+        os.makedirs(pasta_ffmpeg(), exist_ok=True)
+        tmp = destino + ".baixando"
+        with open(tmp, "wb") as f:
+            f.write(z.read(nome))
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, destino)
+    return destino
+
+
+def _sem_janela():
+    return {"creationflags": 0x08000000} if WIN else {}       # CREATE_NO_WINDOW
+
+
+def escolher_codificador(ffmpeg):
+    """Primeiro codificador que funciona de verdade neste PC (testa com 5 quadros)."""
+    import subprocess
+    for nome, rotulo, extra in CODIFICADORES:
+        try:
+            r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                "color=c=black:s=640x360:r=30", "-frames:v", "5", "-c:v", nome] + extra +
+                               ["-f", "null", "-"], capture_output=True, timeout=20, **_sem_janela())
+            if r.returncode == 0:
+                return nome, rotulo, extra
+        except Exception:
+            continue
+    raise RuntimeError("nenhum codificador de vídeo funcionou")
+
+
+def pasta_videos():
+    base = os.path.join(os.path.expanduser("~"), "Videos")
+    if not os.path.isdir(base):
+        base = os.path.expanduser("~")
+    return os.path.join(base, "PSTudo")
+
+
+class Gravador:
+    """Grava o vídeo da placa (do jeito que chega, sem perder qualidade) e o áudio num .mp4.
+    O vídeo vai para o ffmpeg pela entrada padrão e o áudio por uma conexão local; o ffmpeg põe os dois
+    no relógio de chegada, então ficam sincronizados mesmo que a placa não seja 60,00 Hz certinho."""
+
+    def __init__(self, ffmpeg, codificador, w, h, fps, audio=None):
+        import socket as _socket
+        import subprocess
+        self.w, self.h = w, h
+        self.rodando = True
+        self.erro = None
+        self.inicio = time.time()
+        self.perdidos = 0
+        self.fila_v = queue.Queue(maxsize=24)
+        self.fila_a = queue.Queue(maxsize=400)
+        os.makedirs(pasta_videos(), exist_ok=True)
+        self.arquivo = os.path.join(pasta_videos(), time.strftime("PSTudo_%Y-%m-%d_%H-%M-%S.mp4"))
+        nome, self.rotulo, extra = codificador
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+               "-thread_queue_size", "64", "-use_wallclock_as_timestamps", "1",
+               "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0"]
+        self.sock = None
+        self.com_audio = False
+        if audio is not None:
+            srv = _socket.socket()
+            srv.bind(("127.0.0.1", 0))
+            porta = srv.getsockname()[1]
+            srv.close()
+            cmd += ["-thread_queue_size", "512", "-use_wallclock_as_timestamps", "1",
+                    "-f", "s16le", "-ar", str(audio[0]), "-ac", str(audio[1]),
+                    "-i", f"tcp://127.0.0.1:{porta}?listen=1"]
+        cmd += ["-map", "0:v"] + (["-map", "1:a", "-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1000"]
+                                  if audio is not None else [])
+        cmd += ["-c:v", nome] + extra + ["-pix_fmt", "yuv420p", "-fps_mode", "cfr", "-r", str(fps),
+                                         "-movflags", "+frag_keyframe+empty_moov+default_base_moof", self.arquivo]
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_sem_janela())
+        # o vídeo começa já: o ffmpeg só abre a porta do áudio depois de ler o começo do vídeo
+        threading.Thread(target=self._loop_video, daemon=True).start()
+        if audio is not None:
+            self.com_audio = True
+            threading.Thread(target=self._loop_audio, args=(porta,), daemon=True).start()
+
+    # ---- chamadas das threads da placa e do áudio (não podem travar)
+    def video(self, quadro):
+        if not self.rodando:
+            return
+        try:
+            self.fila_v.put_nowait(quadro)
+        except queue.Full:
+            self.perdidos += 1
+
+    def audio(self, bloco):
+        if not self.rodando or not self.com_audio:
+            return
+        try:
+            self.fila_a.put_nowait(bloco.copy())
+        except queue.Full:
+            pass
+
+    def _loop_video(self):
+        import cv2
+        try:
+            while self.rodando or not self.fila_v.empty():
+                try:
+                    q = self.fila_v.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if q.shape[1] != self.w or q.shape[0] != self.h:
+                    q = cv2.resize(q, (self.w, self.h), interpolation=cv2.INTER_AREA)
+                self.proc.stdin.write(cv2.cvtColor(q, cv2.COLOR_BGR2YUV_I420).tobytes())
+        except Exception as e:
+            if self.rodando:
+                self.erro = e
+            self.rodando = False
+        finally:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+
+    def _loop_audio(self, porta):
+        import numpy as np
+        import socket as _socket
+        for _ in range(300):                        # espera o ffmpeg abrir a porta do áudio
+            try:
+                self.sock = _socket.create_connection(("127.0.0.1", porta), timeout=0.2)
+                break
+            except OSError:
+                if self.proc.poll() is not None or not self.rodando:
+                    return
+                time.sleep(0.05)
+        if self.sock is None:
+            return
+        while not self.fila_a.empty() and self.fila_a.qsize() > 20:      # descarta o que acumulou na espera
+            self.fila_a.get_nowait()
+        try:
+            while self.rodando or not self.fila_a.empty():
+                try:
+                    b = self.fila_a.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                self.sock.sendall((np.clip(b, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+        except Exception:
+            pass
+        finally:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+
+    def tempo(self):
+        return time.time() - self.inicio
+
+    def parar(self, esperar=15.0):
+        """Fecha as entradas e espera o ffmpeg terminar o arquivo."""
+        self.rodando = False
+        fim = time.time() + esperar
+        while self.proc.poll() is None and time.time() < fim:
+            time.sleep(0.05)
+        if self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(5)
+        if self.proc.returncode not in (0, None) and not self.erro:
+            try:
+                self.erro = RuntimeError((self.proc.stderr.read() or b"").decode("utf-8", "replace").strip()[-200:]
+                                         or f"ffmpeg saiu com {self.proc.returncode}")
+            except Exception:
+                pass
+        return self.arquivo
+
+
 class Audio:
     """Passa o áudio da placa de captura para a saída padrão do PC."""
 
@@ -4344,6 +4623,8 @@ class Audio:
         self.sd = sd
         self.volume = volume  # lista de 1 item, alterada pela interface
         self.stream = None
+        self.gravador = None
+        self.taxa, self.canais = 48000, 2
         erro = None
         for idx in indices:
             try:
@@ -4358,9 +4639,13 @@ class Audio:
 
                 def cb(indata, outdata, frames, t, status, _c=canais):
                     outdata[:] = indata * self.volume[0]
+                    g = self.gravador
+                    if g is not None:
+                        g.audio(indata)
                 self.stream = sd.Stream(device=(idx, saida), samplerate=sr, channels=canais, dtype="float32",
                                         latency="low", callback=cb)
                 self.stream.start()
+                self.taxa, self.canais = sr, canais
                 self.info = f"{api['name']} • {sr // 1000} kHz"
                 return
             except Exception as e:
@@ -4392,8 +4677,10 @@ class Captura:
     - Quadros repetidos (jogo a 30 numa saída de 60 Hz) são marcados: a fluidez só usa os diferentes.
     - A faixa de cor (limitada 16-235 ou completa) é detectada olhando o preto e o branco mais fortes."""
 
-    def __init__(self, fonte, modo, formato="Automático", preferido=None, ao_escolher=None):
+    def __init__(self, fonte, modo, formato="Automático", preferido=None, ao_escolher=None, fonte_mf=None,
+                 leitura="Automática"):
         self.fonte, self.modo = fonte, modo
+        self.fonte_mf, self.leitura = fonte_mf, leitura      # índice da mesma placa no Media Foundation
         self.formato, self.preferido, self.ao_escolher = formato, preferido, ao_escolher
         self.quadro = None
         self.t = 0.0
@@ -4405,6 +4692,7 @@ class Captura:
         self.tamanho = None
         self.formato_usado = ""
         self.faixa_detectada = ""
+        self.gravador = None                             # Gravador ligado: recebe cada quadro da placa
         self.novo = threading.Event()
         self.distintos = collections.deque(maxlen=8)    # (quadro, horário, troca de cena)
         self.previa_tam = None                           # (larg, alt) pedido pela aba; None = sem prévia
@@ -4413,8 +4701,16 @@ class Captura:
         threading.Thread(target=self._loop, daemon=True).start()
 
     # ---- abrir a placa no formato certo
-    def _abrir(self, cv2, fourcc):
-        cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
+    def _abrir(self, cv2, fourcc, via="DSHOW"):
+        if via == "MSMF":
+            # Media Foundation: a leitura nova do Windows, com decodificação na placa de vídeo
+            try:
+                cap = cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF,
+                                       [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
+            except Exception:
+                cap = cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF)
+        else:
+            cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
         if not cap.isOpened():
             cap.release()
             return None
@@ -4453,21 +4749,30 @@ class Captura:
             cap = cv2.VideoCapture(self.fonte)
             return (cap, "arquivo") if cap.isOpened() else (None, "")
         if self.formato == "MJPEG":
-            candidatos = ["MJPG"]
+            formatos = ["MJPG"]
         elif self.formato == "Sem compressão":
-            candidatos = ["YUY2", "NV12"]
+            formatos = ["YUY2", "NV12"]
         else:
-            candidatos = ["YUY2", "NV12", "MJPG"]
-            if self.preferido in candidatos:
-                candidatos.remove(self.preferido)
-                candidatos.insert(0, self.preferido)
-        for i, fcc in enumerate(candidatos):
-            cap = self._abrir(cv2, fcc)
+            formatos = ["YUY2", "NV12", "MJPG"]
+        vias = []
+        if WIN and self.fonte_mf is not None and self.leitura != "DirectShow":
+            vias.append("MSMF")
+        if self.leitura != "Media Foundation" or not vias:
+            vias.append("DSHOW")
+        candidatos = [(v, f) for v in vias for f in formatos]
+        if self.formato == "Automático" and self.preferido:          # o que deu certo da última vez primeiro
+            via_p, _, fmt_p = str(self.preferido).rpartition(":")
+            par = (via_p or "DSHOW", fmt_p)
+            if par in candidatos:
+                candidatos.remove(par)
+                candidatos.insert(0, par)
+        for i, (via, fcc) in enumerate(candidatos):
+            cap = self._abrir(cv2, fcc, via)
             if cap is None:
-                return None, ""
+                continue
             # último candidato: fica com ele mesmo que não esteja perfeito
             if i == len(candidatos) - 1 or self._aguenta(cap, cv2, fcc):
-                return cap, fcc
+                return cap, f"{via}:{fcc}"
             cap.release()
         return None, ""
 
@@ -4480,8 +4785,11 @@ class Captura:
             self.rodando = False
             return
         arquivo = fcc == "arquivo"
+        via, _, fmt = fcc.rpartition(":")
         self.formato_usado = {"YUY2": "sem compressão (YUY2)", "NV12": "sem compressão (NV12)", "MJPG": "MJPEG",
-                              "arquivo": "arquivo"}.get(fcc, fcc)
+                              "arquivo": "arquivo"}.get(fmt, fmt)
+        if via == "MSMF":
+            self.formato_usado = "Media Foundation • " + traduzir(self.formato_usado)
         if self.ao_escolher and fcc and not arquivo:
             try:
                 self.ao_escolher(fcc)
@@ -4526,6 +4834,9 @@ class Captura:
                 hist.clear()
                 hist.append((idx, chegou))
                 estimado = chegou
+            grav = self.gravador
+            if grav is not None:
+                grav.video(q)
             # repetido ou novo? (amostra pequena: 1 pixel a cada 8)
             amostra = np.ascontiguousarray(q[::8, ::8])
             if anterior is None or amostra.shape != anterior.shape:
@@ -4602,7 +4913,7 @@ class Tela:
                                      anchor="ne", fill="#9AA4B8", font=(F_REG, -p.px(11)), text="", tags="view")
         c.tag_bind("tl_video", "<Double-Button-1>", lambda e: self.tl_tela_cheia())
 
-        barra = ctk.CTkFrame(self.root, fg_color="#050B18", corner_radius=0, height=38, width=680)
+        barra = ctk.CTkFrame(self.root, fg_color="#050B18", corner_radius=0, height=38, width=730)
         barra.pack_propagate(False)
         c.create_window(p.px(48), p.px(551), window=barra, anchor="nw", tags="view")
         self.widgets.append(barra)
@@ -4616,8 +4927,8 @@ class Tela:
             return m
 
         self.tl_videos, self.tl_audios = [], {}
-        self.tl_m_video = menu(["Procurando placas…"], 128)
-        self.tl_m_audio = menu(["Procurando áudio…"], 128)
+        self.tl_m_video = menu(["Procurando placas…"], 116)
+        self.tl_m_audio = menu(["Procurando áudio…"], 116)
         self.tl_m_modo = menu(list(MODOS_TELA), 106)
         self.tl_m_modo.set(self.cfg.get("tela_modo") if self.cfg.get("tela_modo") in MODOS_TELA else "1080p 60")
         self.tl_btn = ctk.CTkButton(barra, text="▶  Iniciar", width=96, height=34, corner_radius=17,
@@ -4628,6 +4939,11 @@ class Tela:
                                           hover_color=BTN_HOVER, font=ctk.CTkFont(family=F_SYM, size=15),
                                           command=self.tl_tela_cheia)
         self.tl_btn_cheia.pack(side="left", padx=(0, 6))
+        self.tl_btn_grav = ctk.CTkButton(barra, text="⏺", width=40, height=34, corner_radius=17, fg_color=BTN,
+                                         hover_color=BTN_HOVER, text_color="#F87171",
+                                         font=ctk.CTkFont(family=F_SYM, size=15), command=self.tl_gravar)
+        self.tl_btn_grav.pack(side="left", padx=(0, 6))
+        self._tl_botao_gravar()
         self.tl_fsr = tk.BooleanVar(value=bool(self.cfg.get("tela_fsr", False)))
         self.tl_interp = self.cfg.get("tela_interp", "Desligada")
         if self.tl_interp not in INTERP_OPCOES:      # versões antigas guardavam "120 Hz" etc.
@@ -4662,6 +4978,10 @@ class Tela:
             t.start()
             t.join(8)
             videos = res.get("v") or sondar_placas_video()
+            try:
+                self.tl_videos_mf = listar_placas_mf()
+            except Exception:
+                self.tl_videos_mf = []
             try:
                 audios = listar_entradas_audio()
             except Exception:
@@ -4714,9 +5034,12 @@ class Tela:
 
         def escolheu(fcc, _k=chave_fmt):
             salvos[_k] = fcc
+        mf = getattr(self, "tl_videos_mf", [])
+        fonte_mf = mf.index(nome_v) if mf.count(nome_v) == 1 else None    # mesma placa no Media Foundation
         self.tl_cap = Captura(fonte, MODOS_TELA.get(modo, (1920, 1080, 60)),
                               formato=self.cfg.get("tela_formato", "Automático"), preferido=salvos.get(chave_fmt),
-                              ao_escolher=escolheu)
+                              ao_escolher=escolheu, fonte_mf=fonte_mf,
+                              leitura=self.cfg.get("tela_leitura", "Automática"))
         self.tl_ultimo = -1
         self.tl_geracao = getattr(self, "tl_geracao", 0) + 1
         self.c.itemconfig(self.tl_aviso, text="Conectando à placa…")
@@ -4735,6 +5058,8 @@ class Tela:
         self.root.after(15, lambda: self.tl_desenhar(g))
 
     def tl_parar(self, msg=None, msg2=""):
+        if getattr(self, "tl_grav", None):
+            self._tl_parar_gravacao()
         if getattr(self, "tl_cap", None):
             self.tl_cap.parar()
         self.tl_cap = None
@@ -4756,6 +5081,101 @@ class Tela:
             self.tl_btn.configure(text="▶  Iniciar", fg_color="#0070D1", hover_color="#1888F0", text_color=BRANCO)
 
     # ---- desenho
+    # ---- gravação
+    def _tl_botao_gravar(self):
+        b = getattr(self, "tl_btn_grav", None)
+        if not b or not b.winfo_exists():
+            return
+        g = getattr(self, "tl_grav", None)
+        if g is not None:
+            seg = int(g.tempo())
+            b.configure(text=f"■ {seg // 60:02d}:{seg % 60:02d}", width=86, fg_color="#3A1620", hover_color="#5A1E2C")
+        elif getattr(self, "tl_grav_preparando", False):
+            b.configure(text="…", width=40, fg_color=BTN, hover_color=BTN_HOVER)
+        else:
+            b.configure(text="⏺", width=40, fg_color=BTN, hover_color=BTN_HOVER)
+
+    def tl_gravar(self):
+        """Liga/desliga a gravação do que chega da placa (vídeo + áudio) num .mp4."""
+        if getattr(self, "tl_grav", None):
+            self._tl_parar_gravacao()
+            return
+        cap = getattr(self, "tl_cap", None)
+        if not cap or getattr(self, "tl_grav_preparando", False):
+            return
+        if cap.tamanho is None:
+            self._tl_info_rapida("Espere a imagem da placa aparecer para gravar.")
+            return
+        self.tl_grav_preparando = True
+        self._tl_botao_gravar()
+
+        def progresso(feito, total):
+            self.fila.put(("cb", lambda: self._tl_info_rapida(
+                traduzir_modelo("Baixando o gravador (só na primeira vez)… {0}%", int(feito * 100 / max(1, total))))))
+
+        def trabalho():
+            try:
+                ff = obter_ffmpeg(progresso)
+                cod = getattr(self, "_tl_codificador", None) or escolher_codificador(ff)
+                self._tl_codificador = cod
+                self.fila.put(("cb", lambda: self._tl_comecar_gravacao(ff, cod)))
+            except Exception as e:
+                msg = str(e)[:90]
+                self.fila.put(("cb", lambda: (setattr(self, "tl_grav_preparando", False), self._tl_botao_gravar(),
+                                              self._tl_info_rapida(traduzir_modelo("Não consegui gravar ({0})", msg)))))
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _tl_comecar_gravacao(self, ff, cod):
+        self.tl_grav_preparando = False
+        cap = getattr(self, "tl_cap", None)
+        if not cap or cap.tamanho is None:
+            self._tl_botao_gravar()
+            return
+        w, h = cap.tamanho
+        fps = max(24, min(120, round(cap.fps or MODOS_TELA.get(self.cfg.get("tela_modo"), (0, 0, 60))[2])))
+        aud = getattr(self, "tl_audio", None)
+        try:
+            g = Gravador(ff, cod, w, h, fps, audio=(aud.taxa, aud.canais) if aud else None)
+        except Exception as e:
+            self._tl_info_rapida(traduzir_modelo("Não consegui gravar ({0})", str(e)[:90]))
+            self._tl_botao_gravar()
+            return
+        self.tl_grav = g
+        cap.gravador = g
+        if aud:
+            aud.gravador = g
+        if getattr(self, "tl_gpu", None):
+            self.tl_gpu.avisar(traduzir_modelo("Gravando ({0})", g.rotulo))
+        self._tl_info_rapida(traduzir_modelo("Gravando com {0}…", g.rotulo))
+        self._tl_botao_gravar()
+
+    def _tl_parar_gravacao(self):
+        g, self.tl_grav = getattr(self, "tl_grav", None), None
+        if g is None:
+            return
+        if getattr(self, "tl_cap", None):
+            self.tl_cap.gravador = None
+        if getattr(self, "tl_audio", None):
+            self.tl_audio.gravador = None
+        self._tl_botao_gravar()
+        if getattr(self, "tl_gpu", None):
+            self.tl_gpu.avisar("Gravação salva")
+
+        def fim():
+            arq = g.parar()
+            if g.erro:
+                msg = traduzir_modelo("Não consegui gravar ({0})", str(g.erro)[:90])
+            else:
+                msg = traduzir_modelo("✓ Vídeo salvo em {0}", arq)
+            self.fila.put(("cb", lambda: self._tl_info_rapida(msg, 8000)))
+        threading.Thread(target=fim, daemon=True).start()
+
+    def _tl_info_rapida(self, texto, ms=4000):
+        """Mensagem curta no canto da prévia (some sozinha)."""
+        self._tl_msg_ate = time.time() + ms / 1000
+        if self.aba == "tela" and getattr(self, "tl_info", None):
+            self.c.itemconfig(self.tl_info, text=texto)
+
     def _tl_texto_gpu(self, g, cap):
         txt = traduzir(f"Tela cheia na placa de vídeo • {g.fps:.0f} fps na tela")
         m = g.interp_modo
@@ -4786,9 +5206,13 @@ class Tela:
                           "Feche o OBS ou outro programa que esteja usando a placa e tente de novo."
                           if erro == "abrir" else "A placa parou de mandar imagem. Confira o cabo HDMI e o PS3.")
             return
+        if getattr(self, "tl_grav", None) and int(self.tl_grav.tempo()) != getattr(self, "_tl_grav_seg", -1):
+            self._tl_grav_seg = int(self.tl_grav.tempo())
+            self._tl_botao_gravar()
+        mensagem_fixa = time.time() < getattr(self, "_tl_msg_ate", 0)
         if getattr(self, "tl_gpu", None):
             cap.previa_tam = None          # a tela cheia está na frente: a prévia não gasta nada
-            if self.aba == "tela" and (cap.n // 30) != getattr(self, "_tl_ult_info", -1):
+            if self.aba == "tela" and not mensagem_fixa and (cap.n // 30) != getattr(self, "_tl_ult_info", -1):
                 self._tl_ult_info = cap.n // 30
                 self.c.itemconfig(self.tl_info, text=self._tl_texto_gpu(self.tl_gpu, cap))
             prox(100)
@@ -4816,7 +5240,8 @@ class Tela:
             if not self.tl_cheia and self.c.itemcget(self.tl_aviso, "text"):
                 self.c.itemconfig(self.tl_aviso, text="")
                 self.c.itemconfig(self.tl_aviso2, text="")
-        if not self.tl_cheia and (cap.n // 15) != getattr(self, "_tl_ult_info", -1) and cap.quadro is not None:
+        if not self.tl_cheia and not mensagem_fixa and (cap.n // 15) != getattr(self, "_tl_ult_info", -1) \
+                and cap.quadro is not None:
             self._tl_ult_info = cap.n // 15
             w_, h_ = cap.tamanho or (0, 0)
             txt = f"{w_}×{h_} • {cap.fps:.0f} fps"
@@ -4851,7 +5276,7 @@ class Tela:
             self.tl_gpu.definir_opcoes(**self._tl_opcoes())
 
     def tl_opcoes_imagem(self):
-        j = self._janela("Imagem", 500, 640)
+        j = self._janela("Imagem", 500, 660)
         f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
         f_txt = ctk.CTkFont(family=F_REG, size=12)
         f_rot = ctk.CTkFont(family=F_SEMI, size=13)
@@ -4935,6 +5360,14 @@ class Tela:
         def mudou_formato(v):
             self.cfg["tela_formato"] = v
         segmentado(FORMATOS_CAPTURA, self.cfg.get("tela_formato", "Automático"), mudou_formato)
+        titulo("Leitura da placa", 12)
+
+        def mudou_leitura(v):
+            self.cfg["tela_leitura"] = v
+        segmentado(LEITURAS_CAPTURA, self.cfg.get("tela_leitura", "Automática"), mudou_leitura)
+        explica("Media Foundation é a leitura mais nova do Windows: costuma ter menos atraso e decodifica o MJPEG na "
+                "placa de vídeo. Automática tenta ela primeiro e volta para o DirectShow se a placa não aceitar. "
+                "Vale na próxima vez que clicar em Iniciar.")
         explica("Sem compressão não tem os quadradinhos do MJPEG e gasta menos processador, mas precisa de uma "
                 "placa USB 3.0. Automático testa e escolhe. Vale na próxima vez que clicar em Iniciar.")
 
@@ -4977,8 +5410,9 @@ class Tela:
                 self.fila.put(("cb", lambda: (setattr(self, "tl_interp", nome), self.cfg.update(tela_interp=nome))))
             self.tl_gpu = TelaCheiaGPU(self.tl_cap, bool(self.tl_fsr.get()), fechou, mudou_fsr,
                                        INTERP_OPCOES.get(self.tl_interp, 0), mudou_interp,
-                                       {"fsr": self.atalho("fsr"), "interp": self.atalho("interp")},
-                                       compativel=self.cfg.get("tela_compativel", True), opcoes=self._tl_opcoes())
+                                       {"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar")},
+                                       compativel=self.cfg.get("tela_compativel", True), opcoes=self._tl_opcoes(),
+                                       ao_gravar=lambda: self.fila.put(("cb", self.tl_gravar)))
             return
         self._tl_cheia_tk()
 
@@ -5497,8 +5931,9 @@ class Conversor:
 
 
 # =============================================================== atalhos
-ATALHOS_PADRAO = {"fsr": "f", "interp": "i"}
-ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)"}
+ATALHOS_PADRAO = {"fsr": "f", "interp": "i", "gravar": "r"}
+ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)",
+                 "gravar": "Gravar / parar (aba Tela)"}
 _TK_PARA_PYGAME = {"return": "return", "space": "space", "tab": "tab", "backspace": "backspace",
                    "insert": "insert", "delete": "delete", "home": "home", "end": "end", "prior": "page up",
                    "next": "page down", "up": "up", "down": "down", "left": "left", "right": "right",
@@ -8409,7 +8844,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self._janela_cfg = j
         j.title("Configurações")
         f_ = self.p.s / self.escala_base
-        j.geometry(f"{int(420 * f_)}x{int(720 * f_)}")
+        j.geometry(f"{int(420 * f_)}x{int(752 * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -8510,7 +8945,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
             for k, v in novos.items():
                 self.cfg[f"atalho_{k}"] = v
             if getattr(self, "tl_gpu", None):
-                self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp")})
+                self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar")})
             self.salvar_cfg()
             j.destroy()
             if mudou_idioma:                 # refaz a interface já no idioma novo
@@ -8554,6 +8989,9 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
                 return gpu.alternar_fsr()
             if nome == self.atalho("interp"):
                 return gpu.proxima_interp()
+        if nome and nome == self.atalho("gravar") and self.aba == "tela" and getattr(self, "tl_cap", None) \
+                and not (e.state & 0x4 and e.state & 0x1):
+            return self.tl_gravar()
 
     # ---------------- janela maximizada / redimensionada: a interface acompanha o tamanho
     def _janela_mudou(self, e):
