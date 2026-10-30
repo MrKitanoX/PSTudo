@@ -65,7 +65,7 @@ public final class Ui {
 
     public static TextView texto(Context c, String s, float sp, int cor, Typeface tf) {
         TextView t = new TextView(c);
-        t.setText(s);
+        t.setText(L.t(s));
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
         t.setTextColor(cor);
         t.setTypeface(tf);

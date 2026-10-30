@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Gera o PSTudo.apk sem Gradle nem Android Studio.
 # Precisa (Ubuntu/Debian):
-#   sudo apt install openjdk-17-jdk android-sdk-build-tools android-sdk-platform-23 apksigner zipalign
+#   sudo apt install openjdk-17-jdk android-sdk-build-tools android-sdk-platform-23 dalvik-exchange apksigner zipalign
 # Uso: ./build_apk.sh            -> android/dist/PSTudo.apk
 # A chave de assinatura fica em android/pstudo.keystore (criada na primeira vez; guarde-a para poder
 # atualizar o app no celular sem desinstalar). Senha: variável KS_SENHA (padrão "pstudo").
@@ -10,14 +10,15 @@ cd "$(dirname "$0")"
 
 SDK=${ANDROID_SDK:-/usr/lib/android-sdk}
 JAR=${ANDROID_JAR:-$(ls "$SDK"/platforms/android-*/android.jar | sort -V | tail -1)}
-BT=$(ls -d "$SDK"/build-tools/*/ | sort -V | tail -1)
+BT=$(for d in $(ls -d "$SDK"/build-tools/*/ | sort -V); do [ -e "$d/dx" ] && echo "$d"; done | tail -1)
 AAPT=${AAPT:-$(command -v aapt || echo "$BT/aapt")}
 DX="$BT/dx"
 SENHA=${KS_SENHA:-pstudo}
 
 rm -rf build && mkdir -p build/gen build/obj dist
 echo "== recursos"
-"$AAPT" package -f -m -J build/gen -M AndroidManifest.xml -S res -I "$JAR" -F build/base.apk
+mkdir -p build/assets/idiomas && cp ../assets/idiomas/*.json build/assets/idiomas/      # mesmas traduções do PC
+"$AAPT" package -f -m -J build/gen -M AndroidManifest.xml -S res -A build/assets -I "$JAR" -F build/base.apk
 echo "== java"
 javac -nowarn -encoding UTF-8 -source 8 -target 8 -bootclasspath "$JAR" -d build/obj \
       $(find src build/gen -name '*.java') 2>&1 | grep -v '^warning:' || true

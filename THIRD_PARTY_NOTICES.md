@@ -9,9 +9,9 @@
   `x86_64-w64-mingw32-gcc -O2 -s -D__MSVCRT__ makeps3iso.c -o makeps3iso.exe`).
 - Versão do código: ver `third_party/ps3iso-utils/VERSAO.txt`.
 
-## AMD FidelityFX Super Resolution 1.0 (RCAS)
+## AMD FidelityFX Super Resolution 1.0 (EASU e RCAS)
 
-O shader de nitidez da tela cheia (`FS_RCAS` em `pstudo.py`) é uma adaptação do RCAS do FSR 1.
+Os shaders de ampliação e nitidez da tela cheia (`FS_ESCALA` e `FS_RCAS` em `pstudo.py`) são adaptações do EASU e do RCAS do FSR 1.
 
 ```
 Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
@@ -33,6 +33,64 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+## RIFE 4.6 (Real-Time Intermediate Flow Estimation)
+
+A fluidez com IA da aba Tela usa a arquitetura e os pesos do RIFE 4.6. Os pesos (`assets/rife46.bin`) foram
+convertidos do modelo `rife-v4.6` do rife-ncnn-vulkan com `tools/empacotar_rife.py`; a rede roda em shaders
+OpenGL escritos para o PSTudo (`pstudo_ia.py`).
+
+- Practical-RIFE: https://github.com/hzwer/Practical-RIFE
+
+```
+MIT License
+
+Copyright (c) 2021 hzwer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+- rife-ncnn-vulkan: https://github.com/nihui/rife-ncnn-vulkan
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2020 nihui
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ## Não incluídos (baixados ou usados no console)

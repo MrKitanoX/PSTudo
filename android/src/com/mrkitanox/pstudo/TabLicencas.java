@@ -120,7 +120,7 @@ public class TabLicencas {
                     for (Ftp.Item it : f.listar("/dev_hdd0/exdata"))
                         if (!it.pasta && it.nome.toLowerCase(Locale.ROOT).endsWith(".rap")) n++;
                     final String t = "Já existem " + n + (n == 1 ? " licença" : " licenças") + " na pasta exdata";
-                    a.ui(new Runnable() { public void run() { noPs3 = t; if (status != null) status.setText(t); } });
+                    a.ui(new Runnable() { public void run() { noPs3 = t; if (status != null) status.setText(L.t(t)); } });
                 } catch (IOException ignored) {
                 } finally {
                     if (f != null) f.fechar();
@@ -150,7 +150,7 @@ public class TabLicencas {
         if (!pode()) return;
         ocupado = true;
         Ui.ativo(btnEnviar, false);
-        btnEnviar.setText("Enviando…");
+        btnEnviar.setText(L.t("Enviando…"));
         final List<Rap> lista = new ArrayList<Rap>();
         for (Rap r : raps) if (r.valido) lista.add(r);
         a.bg(new Runnable() {

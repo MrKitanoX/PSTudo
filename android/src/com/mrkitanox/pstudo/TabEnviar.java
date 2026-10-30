@@ -425,22 +425,22 @@ public class TabEnviar {
         int pct = (int) (f * 100);
         a.marcarAba(0, enviando ? (instalando != null ? "Instalando" : "↑ " + pct + "%") : null);
         if (txPct == null || a.abaAtual() != 0 || !"enviando".equals(modo)) return;
-        txPct.setText(pct + "%");
+        txPct.setText(L.t(pct + "%"));
         barra.set(f);
         if (!jogoAtual.isEmpty()) txJogo.setText(jogoAtual);
         String inst = instalando;
         if (inst != null) {
-            txPct.setText("100%");
+            txPct.setText(L.t("100%"));
             barra.set(1f);
-            txSub.setText(inst);
-            txRest.setText("O andamento aparece na tela do PS3. Fique no XMB, sem abrir jogos.");
+            txSub.setText(L.t(inst));
+            txRest.setText(L.t("O andamento aparece na tela do PS3. Fique no XMB, sem abrir jogos."));
             return;
         }
-        txSub.setText(qtd > 1 ? "Jogo " + idx + " de " + qtd : "");
+        txSub.setText(L.t(qtd > 1 ? "Jogo " + idx + " de " + qtd : ""));
         double dt = (System.currentTimeMillis() - inicio) / 1000.0;
         if (dt > 3 && enviado > 0) {
             double vel = enviado / dt;
-            txRest.setText(Caminhos.restante((total - enviado) / vel) + "   ·   " + Caminhos.tamanho((long) vel) + "/s");
+            txRest.setText(L.t(Caminhos.restante((total - enviado) / vel) + "   ·   " + Caminhos.tamanho((long) vel) + "/s"));
         }
     }
 
@@ -477,8 +477,8 @@ public class TabEnviar {
         if (!a.conectado()) { a.aviso("Conecte o PS3 primeiro.", false); return; }
         final CharSequence antes = botao.getText();
         Ui.ativo(botao, false);
-        botao.setText("Atualizando…");
-        if (texto != null) texto.setText("Atualizando a lista de jogos do webMAN e recarregando o XMB…");
+        botao.setText(L.t("Atualizando…"));
+        if (texto != null) texto.setText(L.t("Atualizando a lista de jogos do webMAN e recarregando o XMB…"));
         final String ip = a.ip();
         a.bg(new Runnable() {
             public void run() {
@@ -496,9 +496,9 @@ public class TabEnviar {
                 final int fc = cor;
                 a.ui(new Runnable() {
                     public void run() {
-                        botao.setText(texto != null && fc == Ui.VERDE ? "Atualizar de novo" : antes);
+                        botao.setText(L.t(texto != null && fc == Ui.VERDE ? "Atualizar de novo" : antes));
                         Ui.ativo(botao, true);
-                        if (texto != null) { texto.setText(fm); texto.setTextColor(fc); }
+                        if (texto != null) { texto.setText(L.t(fm)); texto.setTextColor(fc); }
                         else a.aviso(fm, true);
                     }
                 });

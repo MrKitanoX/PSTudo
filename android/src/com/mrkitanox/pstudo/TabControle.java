@@ -43,7 +43,7 @@ public class TabControle {
         LinearLayout topo = Ui.linha(a);
         topo.addView(Ui.texto(a, "Controle remoto", 20, Ui.BRANCO, Ui.LEVE), Ui.lpPeso(1));
         sw = new Switch(a);
-        sw.setText("Ligado  ");
+        sw.setText(L.t("Ligado  "));
         sw.setTextColor(Ui.BRANCO);
         sw.setTextSize(14);
         sw.setChecked(ligado());
@@ -69,11 +69,11 @@ public class TabControle {
 
     private void msgPadrao() {
         if (lblMsg == null) return;
-        if (!a.conectado()) { lblMsg.setText("Conecte o PS3 para usar o controle remoto."); lblMsg.setTextColor(Ui.AMARELO); return; }
+        if (!a.conectado()) { lblMsg.setText(L.t("Conecte o PS3 para usar o controle remoto.")); lblMsg.setTextColor(Ui.AMARELO); return; }
         lblMsg.setTextColor(Ui.CINZA);
-        lblMsg.setText(ligado() ? "Para jogos: desligue os outros controles do PS3 antes de ligar aqui (senão este vira o jogador 2). "
+        lblMsg.setText(L.t(ligado() ? "Para jogos: desligue os outros controles do PS3 antes de ligar aqui (senão este vira o jogador 2). "
                 + "Também aceita um controle Bluetooth ligado no celular. O analógico vai inclinado até o fim."
-                : "Ligue para controlar o PS3 por aqui.");
+                : "Ligue para controlar o PS3 por aqui."));
     }
 
     void statusMudou() {
@@ -89,7 +89,7 @@ public class TabControle {
                 a.ui(new Runnable() {
                     public void run() {
                         desligar();
-                        if (lblMsg != null) { lblMsg.setText(m); lblMsg.setTextColor(Ui.VERMELHO); }
+                        if (lblMsg != null) { lblMsg.setText(L.t(m)); lblMsg.setTextColor(Ui.VERMELHO); }
                     }
                 });
             }

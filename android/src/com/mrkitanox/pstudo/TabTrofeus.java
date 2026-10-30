@@ -46,6 +46,7 @@ public class TabTrofeus {
     private String sel = null;
     private final Map<String, Object> listas = new HashMap<String, Object>();   // List<Trofeu> ou IOException
     private final Set<Integer> marcados = new HashSet<Integer>();
+    private final Map<Integer, Long> novasDatas = new HashMap<Integer, Long>();   // id -> milissegundos
     private String msg = "";
     private int msgCor = Ui.CINZA;
     private TextView lblMsg;
@@ -62,7 +63,7 @@ public class TabTrofeus {
 
     private void msg(String t, int cor) {
         msg = t; msgCor = cor;
-        if (lblMsg != null) { lblMsg.setText(t); lblMsg.setTextColor(cor); }
+        if (lblMsg != null) { lblMsg.setText(L.t(t)); lblMsg.setTextColor(cor); }
     }
 
     private void redesenhar() { if (a.abaAtual() == ABA) a.mostrarAba(ABA); }
@@ -156,7 +157,7 @@ public class TabTrofeus {
         final Jogo j = jogo(sel);
         LinearLayout topo = Ui.linha(a);
         TextView voltar = Ui.botao(a, "←", "normal", new View.OnClickListener() {
-            public void onClick(View v) { if (ocupado) return; sel = null; marcados.clear(); msg("", Ui.CINZA); redesenhar(); }
+            public void onClick(View v) { if (ocupado) return; sel = null; marcados.clear(); novasDatas.clear(); msg("", Ui.CINZA); redesenhar(); }
         });
         voltar.setPadding(dp(14), dp(4), dp(14), dp(4));
         topo.addView(voltar, Ui.margem(a, ViewGroup.LayoutParams.WRAP_CONTENT, dp(40), 0, 0, 10, 0));
@@ -207,9 +208,17 @@ public class TabTrofeus {
                 String det = Trofeus.TIPOS[tp] + (t.detalhe.isEmpty() ? "" : "  •  " + t.detalhe);
                 col.addView(Ui.texto(a, det, 12, Ui.CINZA, Ui.NORMAL));
                 if (t.destravado) {
-                    String q = t.tempo != 0 ? new SimpleDateFormat("dd/MM/yyyy", Locale.ROOT).format(new Date(Trofeus.tempoMs(t.tempo))) : "";
-                    col.addView(Ui.texto(a, (t.sync ? "na PSN" : "ganho") + (q.isEmpty() ? "" : "  •  " + q), 11,
-                            t.sync ? Ui.VERDE : 0xFF7FB2F0, Ui.NORMAL));
+                    Long nova = novasDatas.get(t.id);
+                    long ms = nova != null ? nova : Trofeus.tempoMs(t.tempo);
+                    String q = ms != 0 ? new SimpleDateFormat(L.formatoData() + "  HH:mm", Locale.ROOT).format(new Date(ms)) : "";
+                    String txt = (t.sync ? L.t("na PSN") : L.t("ganho")) + (q.isEmpty() ? "" : "  •  " + q);
+                    if (!t.sync) txt += nova != null ? "  ✎ " + L.t("(não salvo)") : "  ✎";
+                    TextView quando = Ui.texto(a, txt, 12, t.sync ? Ui.VERDE : (nova != null ? 0xFFFBBF24 : 0xFF7FB2F0), Ui.NORMAL);
+                    if (!t.sync) {
+                        quando.setPadding(0, dp(4), 0, dp(4));
+                        quando.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { escolherData(t); } });
+                    }
+                    col.addView(quando);
                 }
                 l.addView(col, Ui.lpPeso(1));
                 lista.addView(l, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
@@ -233,6 +242,12 @@ public class TabTrofeus {
         });
         b1.addView(bTodos, Ui.lpPeso(1.4f));
         c.addView(b1, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        if (!novasDatas.isEmpty()) {
+            bDatas = Ui.botao(a, L.t("Salvar data e hora") + " (" + novasDatas.size() + ")", "azul",
+                    new View.OnClickListener() { public void onClick(View v) { salvarDatas(); } });
+            bDatas.setMinHeight(dp(46));
+            c.addView(bDatas, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 8));
+        } else bDatas = null;
         bDestravar = Ui.botao(a, "Destravar", "azul", new View.OnClickListener() { public void onClick(View v) { destravar(); } });
         bDestravar.setMinHeight(dp(50));
         c.addView(bDestravar, Ui.lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -240,7 +255,7 @@ public class TabTrofeus {
         return c;
     }
 
-    private TextView bDesfazer, bTodos, bDestravar;
+    private TextView bDesfazer, bTodos, bDestravar, bDatas;
 
     private void atualizarBotoes() {
         if (bDestravar == null) return;
@@ -248,10 +263,125 @@ public class TabTrofeus {
         Object o = listas.get(sel);
         boolean faltam = false;
         if (o instanceof List) for (Object t : (List<?>) o) if (!((Trofeus.Trofeu) t).destravado) faltam = true;
-        bDestravar.setText(marcados.isEmpty() ? "Destravar" : "Destravar " + marcados.size());
+        bDestravar.setText(L.t(marcados.isEmpty() ? "Destravar" : "Destravar " + marcados.size()));
         Ui.ativo(bDestravar, livre && !marcados.isEmpty());
         Ui.ativo(bTodos, livre && faltam);
         Ui.ativo(bDesfazer, livre && ultimoBackup() != null);
+        if (bDatas != null) Ui.ativo(bDatas, livre);
+    }
+
+    /** Escolhe data e depois hora de um troféu ganho (só no console). Fica pendente até "Salvar". */
+    private void escolherData(final Trofeus.Trofeu t) {
+        if (ocupado) return;
+        final java.util.Calendar cal = java.util.Calendar.getInstance();
+        Long nova = novasDatas.get(t.id);
+        cal.setTimeInMillis(nova != null ? nova : (t.tempo != 0 ? Trofeus.tempoMs(t.tempo) : System.currentTimeMillis()));
+        android.app.DatePickerDialog dd = new android.app.DatePickerDialog(a, new android.app.DatePickerDialog.OnDateSetListener() {
+            public void onDateSet(android.widget.DatePicker v, int ano, int mes, int dia) {
+                cal.set(ano, mes, dia);
+                new android.app.TimePickerDialog(a, new android.app.TimePickerDialog.OnTimeSetListener() {
+                    public void onTimeSet(android.widget.TimePicker v2, int h, int m) {
+                        cal.set(java.util.Calendar.HOUR_OF_DAY, h);
+                        cal.set(java.util.Calendar.MINUTE, m);
+                        cal.set(java.util.Calendar.SECOND, 0);
+                        cal.set(java.util.Calendar.MILLISECOND, 0);
+                        long ms = cal.getTimeInMillis();
+                        if (ms < Trofeus.DATA_MINIMA_MS || ms > System.currentTimeMillis() + 60000L) {
+                            msg(L.t("A data precisa ficar entre 11/11/2006 e agora."), Ui.VERMELHO);
+                            return;
+                        }
+                        novasDatas.put(t.id, ms);
+                        msg(L.t("Toque em \"Salvar data e hora\" para gravar no PS3."), Ui.CINZA);
+                        redesenhar();
+                    }
+                }, cal.get(java.util.Calendar.HOUR_OF_DAY), cal.get(java.util.Calendar.MINUTE), true).show();
+            }
+        }, cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH), cal.get(java.util.Calendar.DAY_OF_MONTH));
+        dd.getDatePicker().setMinDate(Trofeus.DATA_MINIMA_MS);
+        dd.getDatePicker().setMaxDate(System.currentTimeMillis());
+        dd.show();
+    }
+
+    private void salvarDatas() {
+        if (ocupado || novasDatas.isEmpty()) return;
+        final Map<Integer, Long> novas = new HashMap<Integer, Long>(novasDatas);
+        aplicar(L.t("Fazendo backup e mudando as datas… (deixe o PS3 no XMB, sem jogo aberto)"), new Acao() {
+            public Trofeus.Resultado fazer(Map<String, byte[]> arqs) throws IOException {
+                return Trofeus.mudarDatas(arqs, novas, System.currentTimeMillis());
+            }
+            public String pronto(Trofeus.Resultado r) {
+                return r.feitos == 0 ? L.t("Nada mudou.")
+                        : "✓ " + L.f("Data e hora de %d troféu(s) mudadas. Reinicie o PS3 para ver. Não sincronize com a PSN.", r.feitos);
+            }
+        });
+    }
+
+    interface Acao {
+        Trofeus.Resultado fazer(Map<String, byte[]> arqs) throws IOException;
+        String pronto(Trofeus.Resultado r);
+    }
+
+    /** Backup no celular, muda, grava no PS3 com segurança e guarda "depois" para o Desfazer. */
+    private void aplicar(String inicio, final Acao acao) {
+        final Jogo j = jogo(sel);
+        if (ocupado || j == null) return;
+        ocupado = true;
+        final File bk = new File(pastaBackup(), new SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.ROOT).format(new Date()));
+        msg(inicio, Ui.CINZA);
+        atualizarBotoes();
+        a.bg(new Runnable() {
+            public void run() {
+                String m;
+                int cor = Ui.VERDE;
+                Ftp f = null;
+                try {
+                    f = a.conectar();
+                    Map<String, byte[]> arqs = new LinkedHashMap<String, byte[]>();
+                    for (Ftp.Item it : f.listar(j.pasta)) {
+                        String n = it.nome.toUpperCase(Locale.ROOT);
+                        if (it.pasta || n.endsWith(".PNG")) continue;
+                        arqs.put(n, f.baixar(j.pasta + "/" + it.nome));
+                    }
+                    for (String n : MUDAM) if (!arqs.containsKey(n)) throw new IOException(n + " " + L.t("não existe nesta pasta"));
+                    if (!bk.mkdirs() && !bk.isDirectory()) throw new IOException(L.t("não consegui criar o backup no celular"));
+                    for (Map.Entry<String, byte[]> e : arqs.entrySet()) {
+                        FileOutputStream o = new FileOutputStream(new File(bk, e.getKey()));
+                        try { o.write(e.getValue()); } finally { o.close(); }
+                    }
+                    Trofeus.Resultado r = acao.fazer(arqs);
+                    if (r.feitos > 0) {
+                        a.ui(new Runnable() { public void run() { msg(L.t("Gravando no PS3…"), Ui.CINZA); } });
+                        gravar(f, j.pasta, r.novos, arqs);
+                        File depois = new File(bk, "depois");
+                        if (depois.mkdirs() || depois.isDirectory())
+                            for (Map.Entry<String, byte[]> e : r.novos.entrySet()) {
+                                FileOutputStream o = new FileOutputStream(new File(depois, e.getKey()));
+                                try { o.write(e.getValue()); } finally { o.close(); }
+                            }
+                    }
+                    m = acao.pronto(r);
+                } catch (IOException e) {
+                    m = L.t("Não mudei:") + " " + e.getMessage();
+                    cor = Ui.VERMELHO;
+                } catch (RuntimeException e) {
+                    m = L.t("Não mudei:") + " " + e;
+                    cor = Ui.VERMELHO;
+                } finally {
+                    if (f != null) f.fechar();
+                }
+                final String fm = m;
+                final int fc = cor;
+                final boolean deuCerto = cor == Ui.VERDE;
+                a.ui(new Runnable() {
+                    public void run() {
+                        ocupado = false;
+                        if (deuCerto) novasDatas.clear();
+                        msg(fm, fc);
+                        escolher(j.codigo, true);
+                    }
+                });
+            }
+        });
     }
 
     // ------------------------------------------------------------------ backups (no celular)
@@ -365,7 +495,7 @@ public class TabTrofeus {
     }
 
     private void escolher(final String cod, boolean deNovo) {
-        if (!cod.equals(sel)) marcados.clear();
+        if (!cod.equals(sel)) { marcados.clear(); novasDatas.clear(); }
         sel = cod;
         final Jogo j = jogo(cod);
         if (j != null && !j.erro.isEmpty() && !deNovo) listas.put(cod, new IOException(j.erro));

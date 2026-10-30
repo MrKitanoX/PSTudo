@@ -59,7 +59,7 @@ public class TabUpdates {
     private void msg(String t, int cor) {
         msg = t;
         msgCor = cor;
-        if (lblMsg != null) { lblMsg.setText(t); lblMsg.setTextColor(cor); }
+        if (lblMsg != null) { lblMsg.setText(L.t(t)); lblMsg.setTextColor(cor); }
     }
 
     private void progresso(float f) {
@@ -102,7 +102,7 @@ public class TabUpdates {
         LinearLayout busca = Ui.linha(a);
         final EditText campo = new EditText(a);
         campo.setSingleLine(true);
-        campo.setHint("Código do jogo (ex.: BLUS30443)");
+        campo.setHint(L.t("Código do jogo (ex.: BLUS30443)"));
         campo.setHintTextColor(Ui.CINZA_ESCURO);
         campo.setTextColor(Ui.BRANCO);
         campo.setTextSize(14);

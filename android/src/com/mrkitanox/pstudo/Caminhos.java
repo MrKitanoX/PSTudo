@@ -83,9 +83,9 @@ public final class Caminhos {
     }
 
     public static String restante(double seg) {
-        if (seg < 60) return "menos de 1 min";
+        if (seg < 60) return L.t("menos de 1 min");
         long m = Math.round(seg / 60);
-        if (m < 60) return "cerca de " + m + " min";
-        return "cerca de " + (m / 60) + " h " + (m % 60) + " min";
+        if (m < 60) return L.tm("cerca de {0} min", m);
+        return L.tm("cerca de {0} h {1} min", m / 60, m % 60);
     }
 }

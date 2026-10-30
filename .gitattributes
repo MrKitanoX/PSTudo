@@ -5,3 +5,6 @@
 *.wav binary
 *.png binary
 *.ico binary
+*.bin binary
+*.json text eol=lf
+*.java text eol=lf

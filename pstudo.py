@@ -13,11 +13,13 @@ Interface escura no estilo dos consoles modernos, com o mínimo de informação 
 """
 
 import ftplib
+import collections
 import json
 import math
 import os
 import queue
 import random
+import re
 import socket
 import struct
 import sys
@@ -55,6 +57,210 @@ DESTINOS_AUTO = {".iso": "/dev_hdd0/PS3ISO", ".pkg": "/dev_hdd0/packages",
 DESTINOS = ["Automático", "/dev_hdd0/GAMES", "/dev_hdd0/PS3ISO", "/dev_hdd0/packages",
             "/dev_hdd0/PS2ISO", "/dev_hdd0/PSXISO", "/dev_usb000/GAMES"]
 
+
+
+# =============================================================== idiomas
+# As frases do app estão escritas em português no código. A tradução acontece na hora de mostrar:
+# rótulos, botões, menus, textos do canvas, títulos de janela e avisos passam por traduzir().
+# Frases montadas com números/nomes usam modelos com {0}, {1}… (assets/idiomas/<idioma>.json).
+IDIOMAS = {"pt": "Português", "en": "English", "es": "Español"}
+IDIOMA = {"atual": "pt"}
+_TRAD, _MODELOS, _CACHE_T, _MODELOS_CRUS = {}, [], {}, {}
+_ESPACO_MODELO = re.compile(r"\{(\d+)(?::[^}]*)?\}")
+
+
+def carregar_idioma(cod):
+    """Troca o idioma da interface (pt = sem tradução)."""
+    _TRAD.clear()
+    _MODELOS.clear()
+    _CACHE_T.clear()
+    _MODELOS_CRUS.clear()
+    IDIOMA["atual"] = cod if cod in IDIOMAS else "pt"
+    if IDIOMA["atual"] == "pt":
+        return
+    try:
+        with open(recurso(os.path.join("idiomas", IDIOMA["atual"] + ".json")), encoding="utf-8") as f:
+            dados = json.load(f)
+    except Exception:
+        IDIOMA["atual"] = "pt"
+        return
+    for pt, tr in dados.items():
+        if _ESPACO_MODELO.search(pt):
+            partes, pos = [], 0
+            for m in _ESPACO_MODELO.finditer(pt):
+                partes.append(re.escape(pt[pos:m.start()].replace("{{", "{").replace("}}", "}")))
+                partes.append("(.+?)")
+                pos = m.end()
+            partes.append(re.escape(pt[pos:].replace("{{", "{").replace("}}", "}")))
+            _MODELOS_CRUS[pt] = tr
+            literal = len(_ESPACO_MODELO.sub("", pt))
+            if len(re.findall(r"[^\W\d_]", _ESPACO_MODELO.sub("", pt))) >= 3:   # "{0} de {1}" só por chamada
+                _MODELOS.append((literal, re.compile("^" + "".join(partes) + "$", re.S), tr))
+        else:
+            _TRAD[pt] = tr
+    _MODELOS.sort(key=lambda x: -x[0])
+
+
+def _preencher(alvo, grupos):
+    r = _ESPACO_MODELO.sub(lambda m: grupos[int(m.group(1))] if int(m.group(1)) < len(grupos) else "", alvo)
+    return r.replace("{{", "{").replace("}}", "}")
+
+
+def traduzir(texto):
+    """Traduz uma frase da interface para o idioma escolhido (devolve igual se não souber)."""
+    if IDIOMA["atual"] == "pt" or not isinstance(texto, str) or not texto or texto.isspace():
+        return texto
+    r = _CACHE_T.get(texto)
+    if r is not None:
+        return r
+    r = _TRAD.get(texto)
+    if r is None:
+        nu = texto.strip()
+        if nu != texto and nu in _TRAD:
+            r = texto.replace(nu, _TRAD[nu], 1)
+        else:
+            for _n, rx, alvo in _MODELOS:
+                m = rx.match(texto)
+                if m:
+                    r = _preencher(alvo, [traduzir(g) for g in m.groups()])
+                    break
+        if r is None and "\n" in texto:
+            linhas = texto.split("\n")
+            novas = [traduzir(x) for x in linhas]
+            if novas != linhas:
+                r = "\n".join(novas)
+        if r is None:
+            r = texto
+    if len(_CACHE_T) > 5000:
+        _CACHE_T.clear()
+    _CACHE_T[texto] = r
+    return r
+
+
+def traduzir_modelo(modelo, *valores):
+    """Monta a frase a partir de um modelo com {0}, {1}… já no idioma escolhido."""
+    alvo = _MODELOS_CRUS.get(modelo) if IDIOMA["atual"] != "pt" else None
+    if alvo is None:
+        return modelo.format(*valores)
+    feitos = [format(valores[int(m.group(1))], (m.group(0)[len(m.group(1)) + 2:-1]) if ":" in m.group(0) else "")
+              for m in _ESPACO_MODELO.finditer(modelo)]
+    ordem = {int(m.group(1)): v for m, v in zip(_ESPACO_MODELO.finditer(modelo), feitos)}
+    return _preencher(alvo, [ordem.get(i, "") for i in range(max(ordem) + 1)] if ordem else [])
+
+
+def texto_cru(canvas, *a, **k):
+    """Texto no canvas sem tradução (nomes de arquivos, jogos…)."""
+    return _CRIAR_TEXTO_CRU(canvas, *a, **k)
+
+
+_CRIAR_TEXTO_CRU = tk.Canvas.create_text
+
+
+def _instalar_traducao():
+    """Faz os componentes da interface traduzirem o que mostram (uma vez, ao abrir o app)."""
+    def com_texto(cls, chaves=("text",)):
+        ini, conf, cget = cls.__init__, cls.configure, cls.cget
+
+        def __init__(self, *a, **k):
+            for c in chaves:
+                if isinstance(k.get(c), str):
+                    setattr(self, "_pst_" + c, k[c])
+                    k[c] = traduzir(k[c])
+            ini(self, *a, **k)
+
+        def configure(self, *a, **k):
+            for c in chaves:
+                if isinstance(k.get(c), str):
+                    setattr(self, "_pst_" + c, k[c])
+                    k[c] = traduzir(k[c])
+            return conf(self, *a, **k)
+
+        def cget_(self, nome):
+            if nome in chaves and hasattr(self, "_pst_" + nome):   # o código compara com o texto original
+                return getattr(self, "_pst_" + nome)
+            return cget(self, nome)
+        cls.__init__, cls.configure, cls.config, cls.cget = __init__, configure, configure, cget_
+
+    for cls in (ctk.CTkLabel, ctk.CTkButton, ctk.CTkSwitch, ctk.CTkCheckBox, ctk.CTkRadioButton):
+        com_texto(cls)
+    com_texto(ctk.CTkEntry, ("placeholder_text",))
+
+    def com_valores(cls):
+        """Menus: mostram traduzido, mas o código continua recebendo o valor original."""
+        ini, conf, set_, get_ = cls.__init__, cls.configure, cls.set, cls.get
+
+        def _vals(self, vals):
+            mapa = self.__dict__.setdefault("_pst_mapa", {})
+            out = []
+            for v in vals:
+                tv = traduzir(v)
+                mapa[tv] = v
+                out.append(tv)
+            return out
+
+        def _cmd(self, cmd):
+            return (lambda v: cmd(self.__dict__.get("_pst_mapa", {}).get(v, v))) if cmd else cmd
+
+        def __init__(self, *a, **k):
+            if k.get("values") is not None:
+                k["values"] = _vals(self, k["values"])
+            if k.get("command"):
+                k["command"] = _cmd(self, k["command"])
+            ini(self, *a, **k)
+
+        def configure(self, *a, **k):
+            if k.get("values") is not None:
+                k["values"] = _vals(self, k["values"])
+            if k.get("command"):
+                k["command"] = _cmd(self, k["command"])
+            return conf(self, *a, **k)
+
+        def set(self, valor, *a, **k):
+            if isinstance(valor, str) and valor not in self.__dict__.get("_pst_mapa", {}):
+                valor = traduzir(valor)
+            return set_(self, valor, *a, **k)
+
+        def get(self):
+            v = get_(self)
+            return self.__dict__.get("_pst_mapa", {}).get(v, v)
+        cls.__init__, cls.configure, cls.config, cls.set, cls.get = __init__, configure, configure, set, get
+
+    com_valores(ctk.CTkOptionMenu)
+    com_valores(ctk.CTkSegmentedButton)
+
+    criar_texto, item_conf = tk.Canvas.create_text, tk.Canvas.itemconfigure
+
+    def create_text(self, *a, **k):
+        if isinstance(k.get("text"), str):
+            k["text"] = traduzir(k["text"])
+        return criar_texto(self, *a, **k)
+
+    def itemconfigure(self, tag, cnf=None, **k):
+        if isinstance(k.get("text"), str):
+            k["text"] = traduzir(k["text"])
+        return item_conf(self, tag, cnf, **k)
+    tk.Canvas.create_text = create_text
+    tk.Canvas.itemconfigure = tk.Canvas.itemconfig = itemconfigure
+
+    titulo = tk.Wm.wm_title
+
+    def wm_title(self, string=None):
+        return titulo(self, traduzir(string) if isinstance(string, str) else string)
+    tk.Wm.wm_title = tk.Wm.title = wm_title
+
+    for nome in ("askopenfilename", "askopenfilenames", "askdirectory", "asksaveasfilename"):
+        orig = getattr(filedialog, nome)
+
+        def dialogo(*a, _orig=orig, **k):
+            if isinstance(k.get("title"), str):
+                k["title"] = traduzir(k["title"])
+            if k.get("filetypes"):
+                k["filetypes"] = [(traduzir(d), p) for d, p in k["filetypes"]]
+            return _orig(*a, **k)
+        setattr(filedialog, nome, dialogo)
+
+
+_instalar_traducao()
 
 class Cancelado(Exception):
     pass
@@ -809,23 +1015,41 @@ class Extras:
             ("updates", "Updates", 70), ("trofeus", "Troféus", 70), ("console", "Console", 68), ("tela", "Tela", 50)]
     ABAS_X = 405
 
+    def _abas(self):
+        """Abas com a largura ajustada ao texto do idioma escolhido (a barra não cresce: a letra diminui)."""
+        self._abas_fonte = 13
+        if IDIOMA["atual"] == "pt":
+            return list(self.ABAS)
+        import tkinter.font as tkfont
+        try:
+            f = tkfont.Font(family=F_SEMI, size=-self.p.px(13))
+            larg = [f.measure(traduzir(n)) / self.p.s for _k, n, _w in self.ABAS]
+        except Exception:
+            return list(self.ABAS)
+        cabe = sum(w for *_, w in self.ABAS)
+        fator = min(1.0, (cabe - 18 * len(larg)) / sum(larg))
+        self._abas_fonte = max(10.5, 13 * fator)
+        sobra = (cabe - sum(x * fator for x in larg)) / len(larg)
+        return [(k, n, x * fator + sobra) for (k, n, _w), x in zip(self.ABAS, larg)]
+
     def _montar_abas(self):
         p, c = self.p, self.c
-        total = sum(w for *_, w in self.ABAS) + 8
+        abas = self._abas()
+        total = int(sum(w for *_, w in abas) + 8)
         self.abas_x0 = self.ABAS_X - total / 2
         c.create_image(p.px(self.ABAS_X), p.px(56), image=p.ret(total, 44, 22, (14, 24, 46, 220),
                                                         outline=(255, 255, 255, 40), largura=1))
-        self.aba_sel_img = {k: p.ret(w - 6, 34, 17, (255, 255, 255, 240)) for k, _, w in self.ABAS}
+        self.aba_sel_img = {k: p.ret(int(w - 6), 34, 17, (255, 255, 255, 240)) for k, _, w in abas}
         self.aba_sel = c.create_image(0, 0)
         self.aba_tx = {}
         x = self.abas_x0 + 4
         self.aba_pos = {}
-        for k, nome, w in self.ABAS:
+        for k, nome, w in abas:
             cx = x + w / 2
             self.aba_pos[k] = cx
             tg = f"aba_{k}"
             self.aba_tx[k] = c.create_text(p.px(cx), p.px(56), text=nome, fill=CINZA,
-                                           font=(F_SEMI, -p.px(13)), tags=(tg,))
+                                           font=(F_SEMI, -p.px(self._abas_fonte)), tags=(tg,))
             # área clicável invisível
             r = c.create_rectangle(p.px(x), p.px(38), p.px(x + w), p.px(74), outline="", fill="", tags=(tg,))
             c.tag_lower(r, self.aba_tx[k])
@@ -1390,11 +1614,11 @@ class Extras:
             pasta_de, _, so_nome = nome.rpartition("/")
             x = p.px(72)
             t = self._fm_corta(legivel(so_nome), self.fm_fonte, limite - x)
-            cv.create_text(x, meio, text=t, anchor="w", fill=BRANCO, font=self.fm_fonte)
+            texto_cru(cv, x, meio, text=t, anchor="w", fill=BRANCO, font=self.fm_fonte)     # nome: sem traduzir
             if pasta_de:                 # resultado da pesquisa nas subpastas: mostra onde está
                 x += self.fm_fonte.measure(t) + p.px(10)
-                onde = self._fm_corta("em " + legivel(pasta_de), self.fm_fonte_p, limite - x)
-                cv.create_text(x, meio, text=onde, anchor="w", fill=CINZA_ESCURO, font=self.fm_fonte_p)
+                onde = self._fm_corta(traduzir_modelo("em {0}", legivel(pasta_de)), self.fm_fonte_p, limite - x)
+                texto_cru(cv, x, meio, text=onde, anchor="w", fill=CINZA_ESCURO, font=self.fm_fonte_p)
         self._fm_mostrar_hover()
         # a barra vem por último e só quando muda (ela força a tela a se redesenhar)
         self._fm_atualizar_barra(self.fm_off / total, min(1.0, (self.fm_off + vis) / total))
@@ -1732,7 +1956,7 @@ class Extras:
                       font=(F_LIGHT, -p.px(26)), tags="view")
         sub = f"{len(validos)} {'licença' if len(validos) == 1 else 'licenças'} → /dev_hdd0/exdata"
         if len(validos) < n:
-            sub += f"   •   {n - len(validos)} arquivo(s) inválido(s) serão ignorados"
+            sub = traduzir(sub) + traduzir(f"   •   {n - len(validos)} arquivo(s) inválido(s) serão ignorados")
         c.create_text(p.px(W / 2), p.px(182), text=sub, fill=CINZA, font=(F_REG, -p.px(14)), tags="view")
         lw, lh, y0 = 620, 50, 228
         linha = p.ret(lw, lh, 14, (255, 255, 255, 13), outline=(255, 255, 255, 30), largura=1)
@@ -2541,7 +2765,7 @@ class Controles:
             if regs is None:
                 vazio(lista_reg, "Lendo o PS3…")
                 return
-            cont_reg.configure(text=f"{len(regs)} de {LIMITE_DEVICES}")
+            cont_reg.configure(text=traduzir_modelo("{0} de {1}", len(regs), LIMITE_DEVICES))
             if not regs:
                 vazio(lista_reg, "Nenhum controle registrado ainda.")
                 return
@@ -2601,7 +2825,7 @@ class Controles:
                 cb.pack(anchor="w")
                 info = f"{pad['vid']:04X}:{pad['pid']:04X}"
                 if pad["aviso"]:
-                    info += "  •  " + pad["aviso"]
+                    info += "  •  " + traduzir(pad["aviso"])
                 ctk.CTkLabel(esq, text=info, font=f_txt, text_color="#FBBF24" if pad["aviso"] else CINZA_ESCURO,
                              anchor="w", wraplength=200, justify="left").pack(anchor="w", padx=(28, 0))
                 if not pad["tipo"]:
@@ -2664,12 +2888,12 @@ class Controles:
                 if adicionados:
                     partes.append(f"{len(adicionados)} registrado(s)")
                 if ja:
-                    partes.append(f"{len(ja)} já estava(m) na lista")
+                    partes.append(traduzir(f"{len(ja)} já estava(m) na lista"))
                 if sem:
-                    partes.append(f"{len(sem)} sem espaço (limite de {LIMITE_DEVICES})")
+                    partes.append(traduzir(f"{len(sem)} sem espaço (limite de {LIMITE_DEVICES})"))
                 txt = ", ".join(partes) + "."
                 if adicionados:
-                    txt += " Reative o XPAD (ou reinicie o PS3) para o controle ser reconhecido."
+                    txt += traduzir(" Reative o XPAD (ou reinicie o PS3) para o controle ser reconhecido.")
                 status.configure(text=txt, text_color="#34D399" if adicionados else "#FBBF24")
                 if adicionados:
                     self._rc_oferecer_recarga(rod)
@@ -3092,9 +3316,9 @@ class Console:
 
         def ok(res):
             if ligar:
-                txt = f"Pronto: nos próximos boots o XPAD liga sozinho {ATRASO_XPAD} s depois do HEN."
+                txt = traduzir(f"Pronto: nos próximos boots o XPAD liga sozinho {ATRASO_XPAD} s depois do HEN.")
                 if res:
-                    txt += " Ele saiu do boot_plugins.txt para não carregar duas vezes."
+                    txt += traduzir(" Ele saiu do boot_plugins.txt para não carregar duas vezes.")
             else:
                 txt = "Pronto: o XPAD não liga mais sozinho. Use Ativar quando quiser."
             self.cn_msg(txt, "#34D399")
@@ -3163,13 +3387,13 @@ class Console:
         except OSError:
             vazia = True
         linhas = sum(n for _, n in rel["listas"])
-        txt = f"XPAD desinstalado: {rel['arquivos']} arquivo(s)"
+        txt = traduzir(f"XPAD desinstalado: {rel['arquivos']} arquivo(s)")
         if linhas:
-            txt += f" e {linhas} linha(s) do boot"
+            txt += traduzir(f" e {linhas} linha(s) do boot")
         if rel.get("autoexec"):
-            txt += ", início automático desligado"
+            txt += traduzir(", início automático desligado")
         if not vazia:
-            txt += ". Configurações salvas em PSTudo\\backup_xpad"
+            txt += traduzir(". Configurações salvas em PSTudo\\backup_xpad")
         msg = (txt + ".", "#34D399")
         self.cn_msg(*msg)
         self._cn_msg_pendente = msg          # continua aparecendo depois de recarregar a lista
@@ -3183,13 +3407,13 @@ class Console:
     def _xpad_ok(self, versao, mantidos, ativo, auto=False):
         nome = versao or "XPAD Revolution"
         if ativo:
-            txt = f"{nome} instalado e ativo. Conecte o controle quando aparecer “XPAD Rev Loaded!”."
+            txt = traduzir(f"{nome} instalado e ativo. Conecte o controle quando aparecer “XPAD Rev Loaded!”.")
         else:
-            txt = f"{nome} instalado. Não consegui ativar agora: use Ativar na lista de plugins."
+            txt = traduzir(f"{nome} instalado. Não consegui ativar agora: use Ativar na lista de plugins.")
         if auto:
-            txt += f" Nos próximos boots ele liga sozinho {ATRASO_XPAD} s depois do HEN."
+            txt += traduzir(f" Nos próximos boots ele liga sozinho {ATRASO_XPAD} s depois do HEN.")
         if mantidos:
-            txt += " Configurações antigas mantidas."
+            txt += traduzir(" Configurações antigas mantidas.")
         self._cn_msg_pendente = (txt, "#34D399" if ativo else "#FBBF24")
         self.carregar_console()
 
@@ -3247,134 +3471,167 @@ class Console:
 # =============================================================== tela cheia na placa de vídeo (OpenGL)
 VS_TELA = """
 #version 330
-in vec2 pos;
-out vec2 uv;
-uniform vec4 caixa;   // x, y, largura, altura em coordenadas -1..1
-uniform float inverter;   // 1 = imagem da placa (linhas de cima para baixo); 0 = textura já desenhada
 void main() {
-    uv = vec2(pos.x, mix(pos.y, 1.0 - pos.y, inverter));
-    gl_Position = vec4(caixa.xy + pos * caixa.zw, 0.0, 1.0);
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
 }
 """
 
-FS_SIMPLES = """
+# Todas as texturas guardam a imagem com a linha 0 no topo. "virar" = desenhando direto na tela (y para cima).
+# Passo 1: leva a imagem do tamanho da placa para o tamanho da tela, corrigindo a faixa de cor.
+# modo 0 = bilinear (com média de 4 pontos ao reduzir), modo 1 = FSR 1 EASU (AMD, licença MIT).
+FS_ESCALA = """
 #version 330
-in vec2 uv;
+uniform sampler2D src;
+uniform vec2 tam_in;
+uniform vec2 tam_out;
+uniform vec2 origem;
+uniform float virar;
+uniform int modo;
+uniform int faixa;        // 1 = sinal "limitado" (16-235) mostrado como completo: estica para 0-255
 out vec4 cor;
-uniform sampler2D tex;
-void main() { cor = vec4(texture(tex, uv).rgb, 1.0); }
-"""
 
-# Aumento de resolução Lanczos-2 com trava anti-halo (mesma ideia do EASU do FSR 1)
-FS_LANCZOS = """
-#version 330
-in vec2 uv;
-out vec4 cor;
-uniform sampler2D tex;
-uniform vec2 tam;      // tamanho da imagem de origem em pixels
-float lz(float x) {
-    x = abs(x);
-    if (x < 1e-4) return 1.0;
-    if (x >= 2.0) return 0.0;
-    float px = 3.14159265 * x;
-    return 2.0 * sin(px) * sin(px * 0.5) / (px * px);
+vec3 corrige(vec3 c) {
+    if (faixa == 1) c = clamp((c - 16.0 / 255.0) * (255.0 / 219.0), 0.0, 1.0);
+    return c;
+}
+vec3 px(ivec2 p) { return corrige(texelFetch(src, clamp(p, ivec2(0), ivec2(tam_in) - 1), 0).rgb); }
+float rcpLo(float a) { return uintBitsToFloat(0x7ef07ebbu - floatBitsToUint(a)); }
+float rsqLo(float a) { return uintBitsToFloat(0x5f347d74u - (floatBitsToUint(a) >> 1u)); }
+float lum(vec3 c) { return c.b * 0.5 + (c.r * 0.5 + c.g); }
+
+void tap(inout vec3 aC, inout float aW, vec2 off, vec2 dir, vec2 len, float lob, float clp, vec3 c) {
+    vec2 v = vec2(off.x * dir.x + off.y * dir.y, off.x * (-dir.y) + off.y * dir.x) * len;
+    float d2 = min(v.x * v.x + v.y * v.y, clp);
+    float wB = 2.0 / 5.0 * d2 - 1.0;
+    float wA = lob * d2 - 1.0;
+    wB *= wB; wA *= wA;
+    wB = 25.0 / 16.0 * wB - (25.0 / 16.0 - 1.0);
+    float w = wB * wA;
+    aC += c * w; aW += w;
+}
+void setF(inout vec2 dir, inout float len, float w, float lA, float lB, float lC, float lD, float lE) {
+    float dc = lD - lC, cb = lC - lB;
+    float lenX = rcpLo(max(abs(dc), abs(cb)));
+    float dirX = lD - lB;
+    dir.x += dirX * w;
+    lenX = clamp(abs(dirX) * lenX, 0.0, 1.0);
+    len += lenX * lenX * w;
+    float ec = lE - lC, ca = lC - lA;
+    float lenY = rcpLo(max(abs(ec), abs(ca)));
+    float dirY = lE - lA;
+    dir.y += dirY * w;
+    lenY = clamp(abs(dirY) * lenY, 0.0, 1.0);
+    len += lenY * lenY * w;
+}
+vec3 easu(vec2 ip) {
+    vec2 esc = tam_in / tam_out;
+    vec2 pp = ip * esc + (0.5 * esc - 0.5);
+    vec2 fp = floor(pp);
+    pp -= fp;
+    ivec2 f = ivec2(fp);
+    vec3 b = px(f + ivec2(0, -1)), c = px(f + ivec2(1, -1));
+    vec3 e = px(f + ivec2(-1, 0)), F = px(f), g = px(f + ivec2(1, 0)), h = px(f + ivec2(2, 0));
+    vec3 i = px(f + ivec2(-1, 1)), j = px(f + ivec2(0, 1)), k = px(f + ivec2(1, 1)), l = px(f + ivec2(2, 1));
+    vec3 n = px(f + ivec2(0, 2)), o = px(f + ivec2(1, 2));
+    float bL = lum(b), cL = lum(c), eL = lum(e), fL = lum(F), gL = lum(g), hL = lum(h);
+    float iL = lum(i), jL = lum(j), kL = lum(k), lL = lum(l), nL = lum(n), oL = lum(o);
+    vec2 dir = vec2(0.0);
+    float len = 0.0;
+    setF(dir, len, (1.0 - pp.x) * (1.0 - pp.y), bL, eL, fL, gL, jL);
+    setF(dir, len, pp.x * (1.0 - pp.y), cL, fL, gL, hL, kL);
+    setF(dir, len, (1.0 - pp.x) * pp.y, fL, iL, jL, kL, nL);
+    setF(dir, len, pp.x * pp.y, gL, jL, kL, lL, oL);
+    vec2 dir2 = dir * dir;
+    float dirR = dir2.x + dir2.y;
+    bool zro = dirR < 1.0 / 32768.0;
+    dirR = zro ? 1.0 : rsqLo(dirR);
+    dir.x = zro ? 1.0 : dir.x;
+    dir *= dirR;
+    len = len * 0.5;
+    len *= len;
+    float stretch = (dir.x * dir.x + dir.y * dir.y) * rcpLo(max(abs(dir.x), abs(dir.y)));
+    vec2 len2 = vec2(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    float lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    float clp = rcpLo(lob);
+    vec3 mn4 = min(min(F, g), min(j, k));
+    vec3 mx4 = max(max(F, g), max(j, k));
+    vec3 aC = vec3(0.0);
+    float aW = 0.0;
+    tap(aC, aW, vec2(0.0, -1.0) - pp, dir, len2, lob, clp, b);
+    tap(aC, aW, vec2(1.0, -1.0) - pp, dir, len2, lob, clp, c);
+    tap(aC, aW, vec2(-1.0, 1.0) - pp, dir, len2, lob, clp, i);
+    tap(aC, aW, vec2(0.0, 1.0) - pp, dir, len2, lob, clp, j);
+    tap(aC, aW, vec2(0.0, 0.0) - pp, dir, len2, lob, clp, F);
+    tap(aC, aW, vec2(-1.0, 0.0) - pp, dir, len2, lob, clp, e);
+    tap(aC, aW, vec2(1.0, 1.0) - pp, dir, len2, lob, clp, k);
+    tap(aC, aW, vec2(2.0, 1.0) - pp, dir, len2, lob, clp, l);
+    tap(aC, aW, vec2(2.0, 0.0) - pp, dir, len2, lob, clp, h);
+    tap(aC, aW, vec2(1.0, 0.0) - pp, dir, len2, lob, clp, g);
+    tap(aC, aW, vec2(1.0, 2.0) - pp, dir, len2, lob, clp, o);
+    tap(aC, aW, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
+    return min(mx4, max(mn4, aC / aW));
 }
 void main() {
-    vec2 p = uv * tam - 0.5;
-    vec2 f = fract(p);
-    vec2 base = (floor(p) + 0.5) / tam;
-    vec3 soma = vec3(0.0); float pesos = 0.0;
-    vec3 mn = vec3(1.0), mx = vec3(0.0);
-    for (int j = -1; j <= 2; j++) {
-        float wy = lz(float(j) - f.y);
-        for (int i = -1; i <= 2; i++) {
-            float w = lz(float(i) - f.x) * wy;
-            vec3 c = texture(tex, base + vec2(i, j) / tam).rgb;
-            soma += c * w; pesos += w;
-            if (i >= 0 && i <= 1 && j >= 0 && j <= 1) { mn = min(mn, c); mx = max(mx, c); }
+    vec2 ip = floor(gl_FragCoord.xy - origem);
+    if (virar > 0.5) ip.y = tam_out.y - 1.0 - ip.y;
+    vec3 c;
+    if (modo == 1) {
+        c = easu(ip);
+    } else {
+        vec2 uv = (ip + 0.5) / tam_out;
+        vec2 esc = tam_in / tam_out;
+        if (esc.x > 1.5) {          // reduzindo bastante: média de 4 pontos evita serrilhado
+            vec2 d = 0.25 / tam_out;
+            c = (texture(src, uv + vec2(-d.x, -d.y)).rgb + texture(src, uv + vec2(d.x, -d.y)).rgb +
+                 texture(src, uv + vec2(-d.x, d.y)).rgb + texture(src, uv + d).rgb) * 0.25;
+        } else {
+            c = texture(src, uv).rgb;
         }
+        c = corrige(c);
     }
-    cor = vec4(clamp(soma / pesos, mn, mx), 1.0);
+    cor = vec4(c, 1.0);
 }
 """
 
-# RCAS adaptado do AMD FidelityFX FSR 1 (licença MIT, ver THIRD_PARTY_NOTICES.md): nitidez sem halos
+# Passo 2: RCAS do FSR 1 (AMD, licença MIT, ver THIRD_PARTY_NOTICES.md): nitidez sem halos, já na tela
 FS_RCAS = """
 #version 330
-in vec2 uv;
+uniform sampler2D src;
+uniform vec2 tam;
+uniform vec2 origem;
+uniform float virar;
+uniform float nitidez;   // 0 = desligada, 1 = máximo
 out vec4 cor;
-uniform sampler2D tex;
-uniform vec2 texel;
-uniform float nitidez;   // exp2(-stops); 1.0 = máximo
+vec3 px(ivec2 p) { return texelFetch(src, clamp(p, ivec2(0), ivec2(tam) - 1), 0).rgb; }
 void main() {
-    vec3 b = texture(tex, uv + vec2(0.0, -texel.y)).rgb;
-    vec3 d = texture(tex, uv + vec2(-texel.x, 0.0)).rgb;
-    vec3 e = texture(tex, uv).rgb;
-    vec3 f = texture(tex, uv + vec2(texel.x, 0.0)).rgb;
-    vec3 h = texture(tex, uv + vec2(0.0, texel.y)).rgb;
+    vec2 ip = floor(gl_FragCoord.xy - origem);
+    if (virar > 0.5) ip.y = tam.y - 1.0 - ip.y;
+    ivec2 p = ivec2(ip);
+    vec3 e = px(p);
+    if (nitidez <= 0.0) { cor = vec4(e, 1.0); return; }
+    vec3 b = px(p + ivec2(0, -1)), d = px(p + ivec2(-1, 0)), f = px(p + ivec2(1, 0)), h = px(p + ivec2(0, 1));
     vec3 mn4 = min(min(b, d), min(f, h));
     vec3 mx4 = max(max(b, d), max(f, h));
-    vec3 hitMin = min(mn4, e) / (4.0 * mx4 + 1e-5);
-    vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * min(mn4, e) - 4.0 - 1e-5);
+    vec3 hitMin = mn4 / (4.0 * mx4 + 1e-5);
+    vec3 hitMax = (1.0 - mx4) / (4.0 * mn4 - 4.0 - 1e-5);
     vec3 lobeRGB = max(-hitMin, hitMax);
     float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * nitidez;
-    cor = vec4((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 1.0);
+    cor = vec4(clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 1.0), 1.0);
 }
 """
 
-
-# Quadro intermediário (fluxo nos dois sentidos, aproximação Super SloMo, checagem ida-e-volta)
-FS_INTERP = """
-#version 330
-in vec2 uv;
-out vec4 cor;
-uniform sampler2D ta;
-uniform sampler2D tb;
-uniform sampler2D fab;     // movimento A -> B (unidades de textura)
-uniform sampler2D fba;     // movimento B -> A
-uniform sampler2D tpar;    // 1 = pixel parado (HUD, placar, textos)
-uniform float alfa;        // 0 = A, 1 = B
-uniform vec2 res_fluxo;    // resolução em que o movimento foi medido
-void main() {
-    float t = alfa;
-    vec2 f01 = texture(fab, uv).xy;
-    vec2 f10 = texture(fba, uv).xy;
-    vec2 ft0 = -(1.0 - t) * t * f01 + t * t * f10;
-    vec2 ft1 = (1.0 - t) * (1.0 - t) * f01 - t * (1.0 - t) * f10;
-    vec2 p0 = uv + ft0, p1 = uv + ft1;
-    vec3 c0 = texture(ta, p0).rgb;
-    vec3 c1 = texture(tb, p1).rgb;
-    // confiança: ir de A para B e voltar deve dar no mesmo lugar
-    vec2 g0 = texture(fab, p0).xy; vec2 v0 = texture(fba, p0 + g0).xy;
-    vec2 g1 = texture(fba, p1).xy; vec2 v1 = texture(fab, p1 + g1).xy;
-    float e0 = length((g0 + v0) * res_fluxo);
-    float e1 = length((g1 + v1) * res_fluxo);
-    // amostra que caiu em cima do HUD não serve para um pixel que está se mexendo
-    float s = texture(tpar, uv).r;
-    float s0 = texture(tpar, p0).r, s1 = texture(tpar, p1).r;
-    float w0 = (1.0 - t) / (1.0 + e0 * e0) * (1.0 - s0) + 1e-5 * (1.0 - t);
-    float w1 = t / (1.0 + e1 * e1) * (1.0 - s1) + 1e-5 * t;
-    vec3 c = (c0 * w0 + c1 * w1) / (w0 + w1);
-    // quadro real mais próximo no tempo: usado quando inventar daria imagem dupla
-    vec3 a0 = texture(ta, uv).rgb, b0 = texture(tb, uv).rgb;
-    vec3 perto = t < 0.5 ? a0 : b0;
-    // as duas versões discordam (movimento errado ou objeto aparecendo): nada de mistura transparente
-    c = mix(c, perto, smoothstep(0.06, 0.18, length(c0 - c1)));
-    // as duas amostras caíram no HUD
-    c = mix(c, perto, s0 * s1 * (1.0 - s));
-    cor = vec4(mix(c, perto, s), 1.0);
-}
-"""
-
-# Aviso no canto (texto já desenhado numa textura com transparência)
+# Aviso no canto (texto já desenhado numa textura com transparência, linha 0 no topo)
 FS_AVISO = """
 #version 330
-in vec2 uv;
-out vec4 cor;
 uniform sampler2D tex;
+uniform vec2 tam;
+uniform vec2 origem;
 uniform float opacidade;
+out vec4 cor;
 void main() {
-    vec4 c = texture(tex, uv);
+    vec2 uv = (gl_FragCoord.xy - origem) / tam;
+    vec4 c = texture(tex, vec2(uv.x, 1.0 - uv.y));
     cor = vec4(c.rgb, c.a * opacidade);
 }
 """
@@ -3382,110 +3639,27 @@ void main() {
 # 0 = desligada; 2…6 = multiplica os quadros do jogo; INTERP_NATIVO = acompanha o Hz do monitor
 INTERP_NATIVO = -1
 INTERP_OPCOES = {"Desligada": 0, "x2": 2, "x3": 3, "x4": 4, "x5": 5, "x6": 6, "Nativo": INTERP_NATIVO}
-
-
-class Movimento:
-    """Mede o movimento entre dois quadros em outra thread (OpenCV DIS, nos dois sentidos).
-    Começa no modo de qualidade média e passa para o rápido se o PC não acompanhar."""
-    LARG, ALT = 640, 360
-
-    def __init__(self):
-        import cv2
-        self.cv2 = cv2
-        self.dis_medio = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
-        self.dis_rapido = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
-        self.rapido = False
-        self.grade = None
-        self.tempo_medio = 0.0
-        self.pedido = None
-        self.resultado = None
-        self.cond = threading.Condition()
-        self.rodando = True
-        threading.Thread(target=self._loop, daemon=True).start()
-
-    def pequeno(self, quadro):
-        cv2 = self.cv2
-        return cv2.cvtColor(cv2.resize(quadro, (self.LARG, self.ALT), interpolation=cv2.INTER_AREA),
-                            cv2.COLOR_BGR2GRAY)
-
-    def pedir(self, a, b):
-        with self.cond:
-            self.pedido = (a, b)
-            self.cond.notify()
-
-    def pegar(self):
-        with self.cond:
-            r, self.resultado = self.resultado, None
-            return r
-
-    def parar(self):
-        with self.cond:
-            self.rodando = False
-            self.cond.notify()
-
-    def _medir(self, pa, pb):
-        """Devolve (fab, fba, parado) ou None quando não dá para interpolar com segurança."""
-        import numpy as np
-        cv2 = self.cv2
-        dif = cv2.absdiff(pa, pb)
-        if float(dif.mean()) > 60:      # troca de cena: não inventa quadro nenhum
-            return None
-        dis = self.dis_rapido if self.rapido else self.dis_medio
-        fab = cv2.medianBlur(dis.calc(pa, pb, None), 5)
-        fba = cv2.medianBlur(dis.calc(pb, pa, None), 5)
-        if self.grade is None:
-            self.grade = np.meshgrid(np.arange(self.LARG, dtype=np.float32), np.arange(self.ALT, dtype=np.float32))
-        gx, gy = self.grade
-        puxado = cv2.remap(pb, gx + fab[..., 0], gy + fab[..., 1], cv2.INTER_LINEAR,
-                           borderMode=cv2.BORDER_REPLICATE)
-        erro_parado = cv2.blur(dif.astype(np.float32), (3, 3))
-        erro_mov = cv2.blur(cv2.absdiff(pa, puxado).astype(np.float32), (3, 3))
-        # parado = "não se mexer" explica o pixel melhor que o movimento medido (HUD, placar, textos)
-        mexeu = np.hypot(fab[..., 0], fab[..., 1]) > 0.75
-        parado = ((erro_parado <= erro_mov * 0.5 + 2.0) & mexeu) | (erro_parado < 2.0)
-        parado = cv2.morphologyEx(parado.astype(np.uint8), cv2.MORPH_OPEN, None)
-        # se o movimento não explica boa parte da imagem (explosão, efeito na tela toda), não inventa
-        if float(((erro_mov > 25) & (parado == 0)).mean()) > 0.2:
-            return None
-        for f in (fab, fba):
-            f[parado > 0] = 0
-            f[..., 0] /= self.LARG
-            f[..., 1] /= self.ALT
-        return np.ascontiguousarray(fab), np.ascontiguousarray(fba), np.ascontiguousarray(parado * 255)
-
-    def _loop(self):
-        while True:
-            with self.cond:
-                while self.rodando and self.pedido is None:
-                    self.cond.wait()
-                if not self.rodando:
-                    return
-                (qa, pa, ta), (qb, pb, tb) = self.pedido
-                self.pedido = None
-            t0 = time.perf_counter()
-            fluxo = self._medir(pa, pb)
-            gasto = time.perf_counter() - t0
-            dur = max(tb - ta, 1 / 240)
-            self.tempo_medio = gasto if not self.tempo_medio else self.tempo_medio * 0.8 + gasto * 0.2
-            # ajuste automático: se demora mais que 70% do intervalo do jogo, usa o modo rápido
-            if not self.rapido and self.tempo_medio > 0.7 * dur:
-                self.rapido = True
-            elif self.rapido and self.tempo_medio < 0.25 * dur:
-                self.rapido = False
-            with self.cond:
-                self.resultado = (qa, qb, fluxo, tb - ta, tb)
+FAIXAS_COR = ("Automática", "Limitada", "Completa")
+FORMATOS_CAPTURA = ("Automático", "Sem compressão", "MJPEG")
+NIVEIS_IA = {"Automática": None, "Leve": 640, "Equilibrada": 960, "Alta": 1280}
+LARGURAS_IA = (1280, 960, 640)
 
 
 class TelaCheiaGPU:
     """Janela de tela cheia desenhada pela placa de vídeo, em uma thread própria.
-    Esc ou clique duplo fecha; os atalhos do FSR e da interpolação vêm das configurações."""
+    Esc ou clique duplo fecha; os atalhos do FSR e da interpolação vêm das configurações.
+
+    Ritmo: com a sincronização vertical ligada, cada troca de imagem espera o monitor (sem rasgos).
+    Fluidez: o RIFE (rede neural de interpolação) roda na própria placa de vídeo e cria os quadros
+    que faltam entre dois quadros diferentes do jogo, numa linha do tempo com atraso constante."""
 
     def __init__(self, captura, fsr, ao_fechar, ao_mudar_fsr=None, interp_modo=0, ao_mudar_interp=None,
-                 atalhos=None, compativel=True):
+                 atalhos=None, compativel=True, opcoes=None):
         self.cap, self.fsr, self.ao_fechar, self.ao_mudar_fsr = captura, fsr, ao_fechar, ao_mudar_fsr
         self.interp_modo, self.ao_mudar_interp = interp_modo, ao_mudar_interp
-        self.cadencia = 0.0
         self.atalhos = atalhos or {"fsr": "f", "interp": "i"}
+        self.opcoes = dict(nitidez=0.5, faixa="Automática", vsync=True, ia="Automática")
+        self.opcoes.update(opcoes or {})
         # janela 1 pixel maior que o monitor: o Windows não a trata como tela cheia exclusiva,
         # então Discord, OBS e companhia capturam sem travar
         self.compativel = compativel
@@ -3494,7 +3668,10 @@ class TelaCheiaGPU:
         self.fps = 0.0
         self.hz_monitor = 0
         self.fonte_fps = 0.0
-        self.modo_rapido = False
+        self.atraso_ms = 0.0
+        self.ia_info = ""
+        self.ia_falhou = ""
+        self.faixa_atual = ""
         self.aviso_txt, self.aviso_t = None, 0.0
         self.pronto = threading.Event()
         self.terminou = threading.Event()
@@ -3507,7 +3684,7 @@ class TelaCheiaGPU:
 
     def avisar(self, texto):
         """Mostra um aviso no canto por 1 segundo (pode ser chamado de qualquer thread)."""
-        self.aviso_txt, self.aviso_t = texto, time.perf_counter()
+        self.aviso_txt, self.aviso_t = traduzir(texto), time.perf_counter()
 
     def definir_fsr(self, ligado):
         self.fsr = bool(ligado)
@@ -3515,7 +3692,13 @@ class TelaCheiaGPU:
 
     def definir_interp(self, modo):
         self.interp_modo = modo
-        self.avisar("Interpolação: " + texto_interp(modo, self.fonte_fps, self.hz_monitor))
+        txt = texto_interp(modo, self.fonte_fps, self.hz_monitor)
+        if modo and self.ia_falhou:
+            txt = "indisponível nesta placa de vídeo"
+        self.avisar("Fluidez: " + txt)
+
+    def definir_opcoes(self, **op):
+        self.opcoes.update(op)
 
     def alternar_fsr(self):
         self.definir_fsr(not self.fsr)
@@ -3589,22 +3772,33 @@ class TelaCheiaGPU:
             self.terminou.set()
             self.ao_fechar(self.erro)
 
+    # ---- janela e contexto OpenGL (4.3 para a IA rodar mais rápido; 3.3 se a placa não tiver)
+    def _abrir_janela(self, pygame, moderngl, larg, alt):
+        ultimo = None
+        for maior, menor in ((4, 3), (3, 3)):
+            try:
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, maior)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, menor)
+                pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
+                pygame.display.set_mode((larg, alt), pygame.OPENGL | pygame.DOUBLEBUF | pygame.NOFRAME, vsync=0)
+                return moderngl.create_context()
+            except Exception as e:
+                ultimo = e
+        raise ultimo
+
     def _loop(self):
         import os as _os
         _os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
         _os.environ["SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS"] = "0"
+        _os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
         import numpy as np
         import pygame
         import moderngl
         pygame.display.init()
         pygame.font.init()
-        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
-        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 3)
-        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE)
         larg, alt = pygame.display.get_desktop_sizes()[0]
         oy = 1 if self.compativel else 0     # a linha de baixo fica fora do monitor
-        _os.environ["SDL_VIDEO_WINDOW_POS"] = "0,0"
-        pygame.display.set_mode((larg, alt + oy), pygame.OPENGL | pygame.DOUBLEBUF | pygame.NOFRAME, vsync=0)
+        ctx = self._abrir_janela(pygame, moderngl, larg, alt + oy)
         try:
             pygame.Window.from_display_module().position = (0, 0)
         except Exception:
@@ -3612,19 +3806,12 @@ class TelaCheiaGPU:
         pygame.display.set_caption("PSTudo — Tela")
         pygame.mouse.set_visible(False)
         try:
-            self.hz_monitor = int(pygame.display.get_current_refresh_rate())
+            self.hz_monitor = int(round(pygame.display.get_current_refresh_rate())) or 60
         except Exception:
-            self.hz_monitor = 0
-        ctx = moderngl.create_context()
-        try:
-            pygame.display.gl_set_swap_interval(0)   # sem esperar o monitor: menos atraso
-        except Exception:
-            pass
-        quad = ctx.buffer(np.array([0, 0, 1, 0, 0, 1, 1, 1], dtype="f4").tobytes())
+            self.hz_monitor = 60
         progs = {n: ctx.program(vertex_shader=VS_TELA, fragment_shader=fs)
-                 for n, fs in (("simples", FS_SIMPLES), ("lanczos", FS_LANCZOS), ("rcas", FS_RCAS),
-                               ("interp", FS_INTERP), ("aviso", FS_AVISO))}
-        vaos = {n: ctx.vertex_array(p_, [(quad, "2f", "pos")]) for n, p_ in progs.items()}
+                 for n, fs in (("escala", FS_ESCALA), ("rcas", FS_RCAS), ("aviso", FS_AVISO))}
+        vaos = {n: ctx.vertex_array(p_, []) for n, p_ in progs.items()}
         cache = {}
         escala_aviso = max(1.0, alt / 1080)
         try:
@@ -3633,33 +3820,41 @@ class TelaCheiaGPU:
             fonte = pygame.font.Font(None, int(34 * escala_aviso))
         aviso_cache = {"txt": None, "tex": None, "tam": (0, 0)}
 
-        def textura(nome, tam, comp=3, dtype="f1", filtro=moderngl.LINEAR, bgr=False):
+        def textura(nome, tam, comp=3, dtype="f1", bgr=False):
             t = cache.get(nome)
-            if t is None or t.size != tam or t.components != comp:
-                t = ctx.texture(tam, comp, dtype=dtype, alignment=1)
-                t.filter = (filtro, filtro)
+            if t is None or t.size != tuple(tam) or t.components != comp or t.dtype != dtype:
+                if t is not None:
+                    t.release()
+                    f_ = cache.pop(nome + "_fbo", None)
+                    if f_ is not None:
+                        f_.release()
+                t = ctx.texture(tuple(tam), comp, dtype=dtype, alignment=1)
+                t.filter = (moderngl.LINEAR, moderngl.LINEAR)
                 t.repeat_x = t.repeat_y = False
                 if bgr:
                     t.swizzle = "BGR"   # a placa entrega BGR: a troca é feita pela GPU
                 cache[nome] = t
-                cache.pop(nome + "_fbo", None)
             return t
 
-        def fbo_de(nome, tex):
-            f = cache.get(nome + "_fbo")
-            if f is None:
-                f = ctx.framebuffer(color_attachments=[tex])
-                cache[nome + "_fbo"] = f
-            return f
+        def fbo_de(nome):
+            f_ = cache.get(nome + "_fbo")
+            if f_ is None:
+                f_ = ctx.framebuffer(color_attachments=[cache[nome]])
+                cache[nome + "_fbo"] = f_
+            return f_
 
-        def desenhar(prog, caixa, inverter, viewport, **unis):
+        def passo(prog, viewport, texs, **unis):
+            """Roda um programa (nome, ou "monta" da IA) cobrindo o viewport."""
             ctx.viewport = viewport
-            p_ = progs[prog]
-            p_["caixa"] = caixa
-            p_["inverter"] = inverter
+            p_, vao = (cache["prog_monta"], cache["vao_monta"]) if prog == "monta" else (progs[prog], vaos[prog])
             for k, v in unis.items():
-                p_[k] = v
-            vaos[prog].render(moderngl.TRIANGLE_STRIP)
+                try:
+                    p_[k] = v
+                except KeyError:       # o compilador tirou a variável que não é usada
+                    pass
+            for unidade, t in texs:
+                t.use(unidade)
+            vao.render(moderngl.TRIANGLES, vertices=3)
 
         def desenhar_aviso():
             if not self.aviso_txt:
@@ -3679,17 +3874,18 @@ class TelaCheiaGPU:
                 cx = pad_x - int(2 * escala_aviso)
                 pygame.draw.circle(sup, (0, 112, 209, 255), (cx, sup.get_height() // 2), int(5 * escala_aviso))
                 sup.blit(txt, (cx + int(14 * escala_aviso), pad_y))
-                dados = pygame.image.tobytes(sup, "RGBA")
-                t = ctx.texture(sup.get_size(), 4, dados)
+                if aviso_cache["tex"] is not None:
+                    aviso_cache["tex"].release()
+                t = ctx.texture(sup.get_size(), 4, pygame.image.tobytes(sup, "RGBA"))
                 t.filter = (moderngl.LINEAR, moderngl.LINEAR)
                 aviso_cache.update(txt=self.aviso_txt, tex=t, tam=sup.get_size())
             aw, ah = aviso_cache["tam"]
             m = int(32 * escala_aviso)
-            caixa = (1 - 2 * (aw + m) / larg, 1 - 2 * (ah + m) / alt, 2 * aw / larg, 2 * ah / alt)
+            x0, y0 = larg - aw - m, oy + alt - ah - m
             ctx.enable(moderngl.BLEND)
             ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-            aviso_cache["tex"].use(0)
-            desenhar("aviso", caixa, 1.0, (0, oy, larg, alt), tex=0, opacidade=opac)
+            passo("aviso", (x0, y0, aw, ah), [(0, aviso_cache["tex"])], tex=0, tam=(float(aw), float(ah)),
+                  origem=(float(x0), float(y0)), opacidade=opac)
             ctx.disable(moderngl.BLEND)
 
         def esperar_ate(alvo):
@@ -3699,44 +3895,161 @@ class TelaCheiaGPU:
                     return
                 time.sleep(falta - 0.0015 if falta > 0.002 else 0)
 
-        def mostrar(src, inv, w, h, quando=None):
-            """Desenha a textura src (w×h) na tela, com ou sem FSR, mais o aviso.
-            quando: hora exata de mostrar (a imagem é preparada antes e trocada na hora certa)."""
+        def faixa_agora():
+            f = self.opcoes.get("faixa", "Automática")
+            if f == "Automática":
+                f = "Limitada" if getattr(self.cap, "faixa_detectada", "") == "limitada" else "Completa"
+            self.faixa_atual = f
+            return 1 if f == "Limitada" else 0
+
+        def mostrar(src, w, h):
+            """Desenha a textura src (w×h, linha 0 no topo) na tela: escala/FSR, faixa de cor, nitidez, aviso."""
             esc = min(larg / w, alt / h)
-            vw, vh = max(2, int(w * esc)), max(2, int(h * esc))
-            caixa = (-vw / larg, -vh / alt, 2 * vw / larg, 2 * vh / alt)
+            vw, vh = max(2, int(round(w * esc))), max(2, int(round(h * esc)))
+            x0, y0 = (larg - vw) // 2, oy + (alt - vh) // 2
+            meio = textura("meio", (vw, vh), comp=4, dtype="f2")
+            usar_easu = self.fsr and esc > 1.01
+            fbo_de("meio").use()
+            passo("escala", (0, 0, vw, vh), [(0, src)], src=0, tam_in=(float(w), float(h)),
+                  tam_out=(float(vw), float(vh)), origem=(0.0, 0.0), virar=0.0, modo=int(usar_easu),
+                  faixa=faixa_agora())
             ctx.screen.use()
             ctx.viewport = (0, 0, larg, alt + oy)
             ctx.clear(0, 0, 0)
-            if self.fsr:
-                meio = textura("meio", (vw, vh), filtro=moderngl.NEAREST)
-                fbo_de("meio", meio).use()
-                src.use(0)
-                desenhar("lanczos", (-1.0, -1.0, 2.0, 2.0), inv, (0, 0, vw, vh), tex=0, tam=(float(w), float(h)))
-                ctx.screen.use()
-                meio.use(0)
-                desenhar("rcas", caixa, 0.0, (0, oy, larg, alt), tex=0, texel=(1.0 / vw, 1.0 / vh), nitidez=0.87)
-            else:
-                src.use(0)
-                desenhar("simples", caixa, inv, (0, oy, larg, alt), tex=0)
+            nit = float(self.opcoes.get("nitidez", 0.5)) if self.fsr else 0.0
+            passo("rcas", (x0, y0, vw, vh), [(0, meio)], src=0, tam=(float(vw), float(vh)),
+                  origem=(float(x0), float(y0)), virar=1.0, nitidez=nit)
             desenhar_aviso()
-            if quando:
-                esperar_ate(quando)
             pygame.display.flip()
-            contagem[0] += 1
+            if vsync:
+                ctx.finish()           # não deixa o driver acumular imagens: menos atraso, ritmo certo
 
-        mov = None
+        # ---- fluidez com IA
+        ia = {"rede": None, "nivel": None, "medidas": [], "n": 0, "query": None, "t_nivel": 0.0, "carga": 0.0}
+
+        def preparar_ia(w, h):
+            if self.ia_falhou:
+                return None
+            try:
+                if ia["rede"] is None:
+                    from pstudo_ia import RifeGL, VS as VS_IA, FS_MONTA
+                    ia["rede"] = RifeGL(ctx, vagas=5)
+                    cache["prog_monta"] = ctx.program(vertex_shader=VS_IA.replace("{ver}", "330"),
+                                                      fragment_shader=FS_MONTA)
+                    cache["vao_monta"] = ctx.vertex_array(cache["prog_monta"], [])
+                    ia["query"] = ctx.query(time=True)
+                escolha = NIVEIS_IA.get(self.opcoes.get("ia", "Automática"))
+                if ia["nivel"] is None or (escolha and ia["nivel"] != escolha):
+                    ia["nivel"] = min(escolha or 960, w)
+                lw = min(ia["nivel"], w)
+                lh = max(32, int(round(lw * h / w / 2)) * 2)
+                rede = ia["rede"]
+                if rede.tam is None or rede.conteudo != (lw, lh):
+                    rede.preparar(lw, lh)
+                    for q in quadros:          # os quadros guardados precisam ir de novo para a rede
+                        rede.carregar_quadro(q["vaga"], q["tex"])
+                    ia["chave"] = None
+                return rede
+            except Exception as e:
+                self.ia_falhou = str(e)[:120] or type(e).__name__
+                self.avisar("Fluidez com IA indisponível nesta placa de vídeo")
+                return None
+
+        def interpolar(qa, qb, alfa):
+            rede = ia["rede"]
+            medir = ia["n"] % 12 == 0
+            if medir:
+                with ia["query"]:
+                    rede.inferir(qa["vaga"], qb["vaga"], alfa)
+            else:
+                rede.inferir(qa["vaga"], qb["vaga"], alfa)
+            ia["n"] += 1
+            w, h = qa["w"], qa["h"]
+            saida = textura("interp", (w, h), comp=4, dtype="f2")
+            fbo_de("interp").use()
+            passo("monta", (0, 0, w, h), [(0, qa["tex"]), (1, qb["tex"]), (2, rede.estado)], A=0, B=1, S=2,
+                  rede=tuple(float(v) for v in rede.tam), conteudo=tuple(float(v) for v in rede.conteudo),
+                  tam_fonte=(float(w), float(h)))
+            if medir:
+                try:
+                    gasto = ia["query"].elapsed / 1e9
+                    ia["medidas"].append(gasto)
+                    del ia["medidas"][:-5]
+                except Exception:
+                    pass
+            return saida
+
+        def ajustar_nivel(w):
+            """Automática: diminui a rede se a placa de vídeo estiver apertada, aumenta se sobrar folga."""
+            if not ia["medidas"] or NIVEIS_IA.get(self.opcoes.get("ia", "Automática")):
+                return
+            agora_ = time.perf_counter()
+            tempo = sorted(ia["medidas"])[len(ia["medidas"]) // 2]
+            carga = tempo * ia_por_seg[0]
+            ia["carga"] = carga
+            if agora_ - ia["t_nivel"] < 3.0:
+                return
+            niveis = [n for n in LARGURAS_IA if n <= max(w, 640)]
+            i = niveis.index(ia["nivel"]) if ia["nivel"] in niveis else len(niveis) - 1
+            if carga > 0.55 and i < len(niveis) - 1:
+                ia["nivel"] = niveis[i + 1]
+            elif carga < 0.18 and i > 0:
+                ia["nivel"] = niveis[i - 1]
+            else:
+                return
+            ia["t_nivel"] = agora_
+            ia["medidas"].clear()
+
+        # ---- estado da linha do tempo
         self.pronto.set()
-        contagem = [0]              # imagens mostradas (para o fps na tela)
-        ultimo, ult_clique, t0 = -1, 0.0, time.time()
-        chave_ant = None            # último quadro DIFERENTE (quadro, pequeno, tempo)
-        par = None                  # (w, h, duração) do par sendo interpolado
-        inicio_par = 0.0
-        prox = time.perf_counter()
+        quadros = []                   # quadros DIFERENTES recentes: dict(tex, ts, corte, vaga, w, h, id)
+        pool = []                      # texturas livres do tamanho da placa
+        prox_vaga, prox_id = 0, 0
+        atraso = 0.05                  # quanto a imagem mostrada fica atrás do jogo (segundos)
+        conteudo_ant = 0.0
+        deltas = []                    # intervalos entre quadros diferentes do jogo
+        ultimo_n, ult_clique, t0 = -1, 0.0, time.time()
+        mostradas, chave_mostrada = 0, None
         distintos, t_dist = 0, time.time()
-        vsync, vsync_ok = 0, True
-        intervalos, atrasos, atraso_est, cad = [], [], 0.0, 1 / 30
-        passo, id_par, ultimo_render = 1, 0, None
+        vsync = None
+        trocas = []                    # intervalos medidos entre trocas de imagem (Hz real do monitor)
+        t_troca = time.perf_counter()
+        prox_relogio = time.perf_counter()
+        ia_cont, ia_por_seg, t_ia = 0, [0.0], time.time()
+
+        def guardar_quadro(item):
+            nonlocal prox_vaga, prox_id
+            q, ts, corte = item
+            h, w = q.shape[:2]
+            tex = None
+            while pool:
+                t_ = pool.pop()
+                if t_.size == (w, h):
+                    tex = t_
+                    break
+                t_.release()
+            if tex is None:
+                tex = ctx.texture((w, h), 3, dtype="f1", alignment=1)
+                tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                tex.repeat_x = tex.repeat_y = False
+                tex.swizzle = "BGR"
+            tex.write(np.ascontiguousarray(q))
+            novo = {"tex": tex, "ts": ts, "corte": corte, "vaga": prox_vaga, "w": w, "h": h, "id": prox_id}
+            prox_id += 1
+            # a vaga da rede é reaproveitada: o quadro que a usava sai da lista
+            for velho in [v for v in quadros if v["vaga"] == prox_vaga]:
+                quadros.remove(velho)
+                pool.append(velho["tex"])
+            prox_vaga = (prox_vaga + 1) % 5
+            if quadros and 0 < ts - quadros[-1]["ts"] < 0.25:
+                deltas.append(ts - quadros[-1]["ts"])
+                del deltas[:-60]
+            quadros.append(novo)
+            if ia["rede"] is not None and ia["rede"].tam is not None:
+                try:
+                    ia["rede"].carregar_quadro(novo["vaga"], tex)
+                except Exception:
+                    pass
 
         while self.rodando and self.cap.rodando:
             for ev in pygame.event.get():
@@ -3755,132 +4068,137 @@ class TelaCheiaGPU:
                     if agora - ult_clique < 0.35:
                         self.rodando = False
                     ult_clique = agora
-            modo = self.interp_modo   # cópia: pode ser trocado pela outra janela a qualquer momento
-            aviso_ativo = self.aviso_txt and time.perf_counter() - self.aviso_t < 1.3
-            vsync_quer = 1 if modo == INTERP_NATIVO else 0
-            if vsync_quer != vsync:
+            modo = self.interp_modo if not self.ia_falhou else 0
+            aviso_ativo = bool(self.aviso_txt) and time.perf_counter() - self.aviso_t < 1.3
+            quer_vsync = bool(self.opcoes.get("vsync", True))
+            if quer_vsync != vsync:
                 try:
-                    pygame.display.gl_set_swap_interval(vsync_quer)
-                    vsync = vsync_quer
-                    vsync_ok = True
+                    pygame.display.gl_set_swap_interval(1 if quer_vsync else 0)
                 except Exception:
-                    vsync, vsync_ok = vsync_quer, False
-            # ---------------- sem interpolação: mostra cada quadro assim que chega
+                    quer_vsync = False
+                vsync = quer_vsync
+            hz = self.hz_monitor or 60
+            if len(trocas) >= 30:
+                medio = sorted(trocas)[len(trocas) // 2]
+                if 1 / 400 < medio < 1 / 20 and vsync:
+                    hz = 1 / medio
+            periodo = 1.0 / hz
+
+            # ---------------- sem fluidez: cada quadro novo da placa vai para a tela na próxima troca
             if not modo:
-                if mov:
-                    mov.parar()
-                    mov, chave_ant, par = None, None, None
-                tem_novo = self.cap.novo.wait(0.01)
-                if not tem_novo and not aviso_ativo:
-                    continue
-                self.cap.novo.clear()
+                if quadros:
+                    pool.extend(q["tex"] for q in quadros)
+                    quadros.clear()
+                self.cap.distintos.clear()
+                if self.cap.n == ultimo_n and not aviso_ativo:
+                    self.cap.novo.wait(0.02)
+                    self.cap.novo.clear()
+                    if self.cap.n == ultimo_n and not aviso_ativo:
+                        continue
                 quadro = self.cap.quadro
-                if quadro is None or (self.cap.n == ultimo and not aviso_ativo):
+                if quadro is None:
                     continue
-                ultimo = self.cap.n
+                if self.cap.n != ultimo_n:
+                    ultimo_n = self.cap.n
+                    h, w = quadro.shape[:2]
+                    textura("q", (w, h), bgr=True).write(np.ascontiguousarray(quadro))
+                    mostradas += 1
                 h, w = quadro.shape[:2]
-                tex = textura("q", (w, h), bgr=True)
-                tex.write(np.ascontiguousarray(quadro))
-                mostrar(tex, 1.0, w, h)
-            # ---------------- com interpolação
+                mostrar(cache["q"], w, h)
+            # ---------------- com fluidez
             else:
-                if mov is None:
-                    mov = Movimento()
-                if self.cap.n != ultimo and self.cap.quadro is not None:
-                    ultimo = self.cap.n
-                    quadro, t_q = self.cap.quadro, getattr(self.cap, "t", None) or time.perf_counter()
-                    peq = mov.pequeno(quadro)
-                    # o PS3 manda 60 Hz mesmo com o jogo a 30: quadros repetidos são ignorados
-                    if chave_ant is None or float(np.mean(cv2_absdiff(peq, chave_ant[1]))) > 0.6:
-                        if chave_ant is not None:
-                            mov.pedir(chave_ant, (quadro, peq, t_q))
-                        chave_ant = (quadro, peq, t_q)
-                        distintos += 1
-                res = mov.pegar()
-                if res is not None:
-                    qa, qb, fluxo, dur, tb = res
-                    agora = time.perf_counter()
-                    # ritmo do jogo (mediana dos últimos intervalos) e quanto o cálculo do movimento atrasa
-                    if 1 / 240 < dur < 0.2:
-                        intervalos.append(dur)
-                        del intervalos[:-9]
-                    cad = sorted(intervalos)[len(intervalos) // 2] if intervalos else min(max(dur, 1 / 120), 0.1)
-                    atrasos.append(agora - tb)
-                    del atrasos[:-30]
-                    # margem = 90% dos atrasos recentes: o par quase nunca chega depois da hora marcada
-                    atraso_est = sorted(atrasos)[int(len(atrasos) * 0.9)] if len(atrasos) >= 5 else max(atrasos)
-                    h, w = qb.shape[:2]
-                    textura("a", (w, h), bgr=True).write(np.ascontiguousarray(qa))
-                    textura("b", (w, h), bgr=True).write(np.ascontiguousarray(qb))
-                    if fluxo is None:          # troca de cena ou movimento confuso: vai direto para o quadro novo
-                        par = (w, h, False)
-                    else:
-                        fab, fba, parado = fluxo
-                        textura("fab", (fab.shape[1], fab.shape[0]), comp=2, dtype="f4").write(fab)
-                        textura("fba", (fba.shape[1], fba.shape[0]), comp=2, dtype="f4").write(fba)
-                        textura("par", (parado.shape[1], parado.shape[0]), comp=1).write(parado)
-                        par = (w, h, True)
-                    # o par começa sempre com o mesmo atraso depois do quadro do jogo: ritmo uniforme
-                    inicio_par = tb + atraso_est + 0.001
-                    passo = 1                  # (multiplicador) próximo quadro inventado: 1/N, 2/N…
-                    id_par += 1
-                    self.modo_rapido = mov.rapido
-                    self.cadencia = cad
-                chave_render = (id_par, passo if modo != INTERP_NATIVO else time.perf_counter())
-                if chave_render == ultimo_render and not aviso_ativo:
-                    pass                       # nada mudou: não redesenha
-                elif par is not None:
-                    w, h, tem_fluxo = par
-                    if modo == INTERP_NATIVO:
-                        alfa = min(1.0, max(0.0, (time.perf_counter() - inicio_par) / cad))
-                        if alfa <= 0.0:
-                            alfa = 1.0 / max(2, round(cad * (self.hz_monitor or 60)))
-                    else:
-                        alfa = min(1.0, passo / modo)
-                    # multiplicador: quadro k do par aparece em inicio + (k-1)·cadência/N
-                    quando = inicio_par + (passo - 1) * cad / modo if modo != INTERP_NATIVO else None
-                    ultimo_render = chave_render
-                    if tem_fluxo and alfa < 1.0:
-                        saida = textura("interp", (w, h))
-                        fbo_de("interp", saida).use()
-                        cache["a"].use(0)
-                        cache["b"].use(1)
-                        cache["fab"].use(2)
-                        cache["fba"].use(3)
-                        cache["par"].use(4)
-                        desenhar("interp", (-1.0, -1.0, 2.0, 2.0), 1.0, (0, 0, w, h), ta=0, tb=1, fab=2, fba=3,
-                                 tpar=4, alfa=alfa, res_fluxo=(float(Movimento.LARG), float(Movimento.ALT)))
-                        mostrar(saida, 0.0, w, h, quando)
-                    else:
-                        mostrar(cache["b"], 1.0, w, h, quando)
-                elif chave_ant is not None:
-                    ultimo_render = chave_render
-                    qa = chave_ant[0]
-                    h, w = qa.shape[:2]
-                    tex = textura("q", (w, h), bgr=True)
-                    tex.write(np.ascontiguousarray(qa))
-                    mostrar(tex, 1.0, w, h)
-                # ---- espera até o próximo quadro
-                if modo == INTERP_NATIVO:
-                    if not vsync_ok:           # placa de vídeo sem sincronização vertical: relógio no Hz do monitor
-                        prox += 1.0 / (self.hz_monitor or 60)
-                        agora = time.perf_counter()
-                        if prox < agora - 0.05:
-                            prox = agora
-                        esperar_ate(prox)
-                    # com sincronização vertical, a troca de imagem já espera o monitor
-                else:
-                    if par is not None and passo < modo and ultimo_render == chave_render:
-                        passo += 1             # o próximo já é preparado e mostrado na hora dele
-                    else:                      # esperando o próximo par
-                        esperar_ate(time.perf_counter() + (1 / (self.hz_monitor or 60) if aviso_ativo else 0.002))
+                while self.cap.distintos:
+                    try:
+                        guardar_quadro(self.cap.distintos.popleft())
+                    except IndexError:
+                        break
+                    distintos += 1
+                if not quadros:
+                    self.cap.novo.wait(0.02)
+                    self.cap.novo.clear()
+                    continue
+                w, h = quadros[-1]["w"], quadros[-1]["h"]
+                rede = preparar_ia(w, h)
+                agora = time.perf_counter()
+                # atraso alvo: o maior intervalo recente do jogo + uma troca de tela + margem do cálculo
+                recentes = deltas[-int(max(4, min(60, 1.2 / (sum(deltas[-10:]) / len(deltas[-10:]))))):] \
+                    if deltas else [1 / 30]
+                gasto_ia = (sorted(ia["medidas"])[len(ia["medidas"]) // 2] if ia["medidas"] else 0.004)
+                alvo = min(0.2, max(recentes) + (periodo if vsync else 0.0) + gasto_ia + 0.003)
+                atraso = alvo if alvo > atraso else max(alvo, atraso - 0.00025)
+                conteudo = agora + (periodo if vsync else 0.0) - atraso
+                if conteudo < conteudo_ant:
+                    conteudo = conteudo_ant          # o tempo da imagem nunca volta
+                conteudo_ant = conteudo
+                if conteudo > quadros[-1]["ts"]:     # o próximo quadro atrasou: segura o último e aumenta a folga
+                    atraso += min(conteudo - quadros[-1]["ts"], 0.01)
+                self.atraso_ms = atraso * 1000
+                # par de quadros em volta do instante que vai para a tela
+                qa = qb = None
+                for i in range(len(quadros) - 1, -1, -1):
+                    if quadros[i]["ts"] <= conteudo:
+                        qa = quadros[i]
+                        qb = quadros[i + 1] if i + 1 < len(quadros) else None
+                        break
+                if qa is None:
+                    qa = quadros[0]
+                saida, chave = qa["tex"], ("q", qa["id"])
+                if qb is not None and rede is not None and not qb["corte"] and qb["ts"] - qa["ts"] < 0.12 \
+                        and (qa["w"], qa["h"]) == (qb["w"], qb["h"]):
+                    alfa = (conteudo - qa["ts"]) / (qb["ts"] - qa["ts"])
+                    passos = modo if modo != INTERP_NATIVO else 16
+                    alfa_q = (int(alfa * passos) if modo != INTERP_NATIVO else round(alfa * passos)) / passos
+                    if alfa_q >= 1.0:
+                        saida, chave = qb["tex"], ("q", qb["id"])
+                    elif alfa_q > 0.0:
+                        chave = ("i", qa["id"], qb["id"], alfa_q)
+                        if chave == ia.get("chave"):
+                            saida = cache["interp"]
+                        else:
+                            try:
+                                saida = interpolar(qa, qb, alfa_q)
+                                ia["chave"] = chave
+                                ia_cont += 1
+                            except Exception as e:
+                                self.ia_falhou = str(e)[:120] or type(e).__name__
+                                self.avisar("Fluidez com IA indisponível nesta placa de vídeo")
+                                saida, chave = qa["tex"], ("q", qa["id"])
+                # sobra de quadros velhos (fora da linha do tempo)
+                while len(quadros) > 2 and quadros[1]["ts"] < conteudo - 0.3:
+                    pool.append(quadros.pop(0)["tex"])
+                if chave != chave_mostrada:
+                    mostradas += 1
+                    chave_mostrada = chave
+                if rede is not None:
+                    ajustar_nivel(w)
+                    self.ia_info = f"IA {rede.conteudo[0]}×{rede.conteudo[1]}"
+                mostrar(saida, qa["w"], qa["h"])
+                if not vsync:                         # sem sincronização: relógio próprio no Hz do monitor
+                    prox_relogio += periodo
+                    if prox_relogio < time.perf_counter() - 0.05:
+                        prox_relogio = time.perf_counter()
+                    esperar_ate(prox_relogio)
+            agora_p = time.perf_counter()
+            if modo and vsync:
+                trocas.append(agora_p - t_troca)
+                del trocas[:-90]
+            t_troca = agora_p
             agora = time.time()
             if agora - t0 >= 1:
-                self.fps, contagem[0], t0 = contagem[0] / (agora - t0), 0, agora
+                self.fps, mostradas, t0 = mostradas / (agora - t0), 0, agora
             if agora - t_dist >= 1:
-                self.fonte_fps, distintos, t_dist = distintos / (agora - t_dist), 0, agora
-        if mov:
-            mov.parar()
+                if modo:
+                    self.fonte_fps = distintos / (agora - t_dist)
+                else:
+                    self.fonte_fps = getattr(self.cap, "fps_distintos", 0.0)
+                distintos, t_dist = 0, agora
+            if agora - t_ia >= 1:
+                ia_por_seg[0], ia_cont, t_ia = ia_cont / (agora - t_ia), 0, agora
+        if ia["rede"] is not None:
+            try:
+                ia["rede"].liberar()
+            except Exception:
+                pass
         ctx.release()
 
 
@@ -3905,11 +4223,6 @@ def tecla_para_vk(nome):
     return {"space": 0x20, "tab": 0x09, "insert": 0x2D, "delete": 0x2E, "home": 0x24, "end": 0x23,
             "page up": 0x21, "page down": 0x22, "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
             "pause": 0x13, "scroll lock": 0x91, "return": 0x0D, "backspace": 0x08}.get(nome)
-
-
-def cv2_absdiff(a, b):
-    import cv2
-    return cv2.absdiff(a, b)
 
 
 CAPTURA_PALAVRAS = ("capture", "captura", "hdmi", "cam link", "elgato", "avermedia", "usb3", "usb 3", "video",
@@ -4022,42 +4335,124 @@ class Audio:
             self.stream = None
 
 
-class Captura:
-    """Lê quadros da placa em outra thread e guarda sempre o mais recente."""
+def _fourcc_txt(v):
+    v = int(v or 0)
+    return "".join(chr((v >> (8 * i)) & 0xFF) for i in range(4)).strip("\x00 ")
 
-    def __init__(self, fonte, modo):
+
+class Captura:
+    """Lê quadros da placa em outra thread.
+
+    - Formato: "Sem compressão" (YUY2/NV12) não tem os quadradinhos do MJPEG; "Automático" tenta primeiro
+      sem compressão e só usa MJPEG se a placa não aguentar o modo escolhido.
+    - Cada quadro ganha um horário "alisado" (o USB entrega com tremidas de alguns milissegundos).
+    - Quadros repetidos (jogo a 30 numa saída de 60 Hz) são marcados: a fluidez só usa os diferentes.
+    - A faixa de cor (limitada 16-235 ou completa) é detectada olhando o preto e o branco mais fortes."""
+
+    def __init__(self, fonte, modo, formato="Automático", preferido=None, ao_escolher=None):
         self.fonte, self.modo = fonte, modo
+        self.formato, self.preferido, self.ao_escolher = formato, preferido, ao_escolher
         self.quadro = None
+        self.t = 0.0
         self.n = 0
         self.erro = None
         self.rodando = True
         self.fps = 0.0
+        self.fps_distintos = 0.0
         self.tamanho = None
+        self.formato_usado = ""
+        self.faixa_detectada = ""
         self.novo = threading.Event()
+        self.distintos = collections.deque(maxlen=8)    # (quadro, horário, troca de cena)
+        self.previa_tam = None                           # (larg, alt) pedido pela aba; None = sem prévia
+        self.previa = None                               # imagem PIL pronta para a aba
+        self.previa_n = 0
         threading.Thread(target=self._loop, daemon=True).start()
+
+    # ---- abrir a placa no formato certo
+    def _abrir(self, cv2, fourcc):
+        cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
+        if not cap.isOpened():
+            cap.release()
+            return None
+        w, h, fps = self.modo
+        if fourcc:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, fps)
+        if fourcc:   # alguns drivers só aceitam o formato depois do tamanho
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
+    def _aguenta(self, cap, cv2, fourcc, segundos=1.3):
+        """Confere se a placa está mesmo entregando o formato, o tamanho e os quadros por segundo pedidos."""
+        w, h, fps = self.modo
+        if fourcc and _fourcc_txt(cap.get(cv2.CAP_PROP_FOURCC)).upper() not in (fourcc, ""):
+            return False
+        t0, n, ok_tam = time.perf_counter(), 0, False
+        while time.perf_counter() - t0 < segundos and self.rodando:
+            ok, q = cap.read()
+            if not ok or q is None:
+                continue
+            n += 1
+            ok_tam = q.shape[1] == w and q.shape[0] == h
+            self.quadro, self.t = q, time.perf_counter()
+            self.tamanho = (q.shape[1], q.shape[0])
+            self.n += 1
+            self.novo.set()
+        ritmo = n / max(1e-3, time.perf_counter() - t0)
+        return ok_tam and ritmo >= fps * 0.8
+
+    def _abrir_melhor(self, cv2):
+        if isinstance(self.fonte, str):
+            cap = cv2.VideoCapture(self.fonte)
+            return (cap, "arquivo") if cap.isOpened() else (None, "")
+        if self.formato == "MJPEG":
+            candidatos = ["MJPG"]
+        elif self.formato == "Sem compressão":
+            candidatos = ["YUY2", "NV12"]
+        else:
+            candidatos = ["YUY2", "NV12", "MJPG"]
+            if self.preferido in candidatos:
+                candidatos.remove(self.preferido)
+                candidatos.insert(0, self.preferido)
+        for i, fcc in enumerate(candidatos):
+            cap = self._abrir(cv2, fcc)
+            if cap is None:
+                return None, ""
+            # último candidato: fica com ele mesmo que não esteja perfeito
+            if i == len(candidatos) - 1 or self._aguenta(cap, cv2, fcc):
+                return cap, fcc
+            cap.release()
+        return None, ""
 
     def _loop(self):
         import cv2
-        arquivo = isinstance(self.fonte, str)
-        if arquivo:
-            cap = cv2.VideoCapture(self.fonte)
-        else:
-            cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
-            w, h, fps = self.modo
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            cap.set(cv2.CAP_PROP_FPS, fps)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not cap.isOpened():
+        import numpy as np
+        cap, fcc = self._abrir_melhor(cv2)
+        if cap is None:
             self.erro = "abrir"
             self.rodando = False
             return
-        t0, cont, falhas = time.time(), 0, 0
+        arquivo = fcc == "arquivo"
+        self.formato_usado = {"YUY2": "sem compressão (YUY2)", "NV12": "sem compressão (NV12)", "MJPG": "MJPEG",
+                              "arquivo": "arquivo"}.get(fcc, fcc)
+        if self.ao_escolher and fcc and not arquivo:
+            try:
+                self.ao_escolher(fcc)
+            except Exception:
+                pass
+        t0, cont, falhas, dist = time.time(), 0, 0, 0
         intervalo = 1 / (cap.get(cv2.CAP_PROP_FPS) or 30) if arquivo else 0
+        periodo = 1.0 / (self.modo[2] if not arquivo else (cap.get(cv2.CAP_PROP_FPS) or 30))
+        estimado = None
+        anterior = None
+        faixas = collections.deque(maxlen=600)
         while self.rodando:
             ok, q = cap.read()
-            if not ok:
+            if not ok or q is None:
                 if arquivo:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
@@ -4068,15 +4463,70 @@ class Captura:
                 time.sleep(0.02)
                 continue
             falhas = 0
-            self.t = time.perf_counter()     # quando o quadro chegou (o ritmo da interpolação usa isto)
+            chegou = time.perf_counter()
+            # horário alisado: a placa manda num ritmo fixo; o atraso do USB varia um pouco a cada quadro
+            if estimado is None:
+                estimado = chegou
+            else:
+                previsto = estimado + periodo
+                erro = chegou - previsto
+                pulados = round(erro / periodo) if erro > 0.6 * periodo else 0
+                if pulados:
+                    previsto += pulados * periodo
+                    erro = chegou - previsto
+                if abs(erro) > 0.025:
+                    estimado = chegou
+                else:
+                    estimado = previsto + 0.08 * erro
+                    periodo = min(1 / 20, max(1 / 125, periodo + 0.002 * erro))
+            # repetido ou novo? (amostra pequena: 1 pixel a cada 8)
+            amostra = np.ascontiguousarray(q[::8, ::8])
+            if anterior is None or amostra.shape != anterior.shape:
+                dif = 255.0
+            else:
+                m = cv2.mean(cv2.absdiff(amostra, anterior))
+                dif = (m[0] + m[1] + m[2]) / 3
+            anterior = amostra
+            if dif > 0.35:
+                self.distintos.append((q, estimado, dif > 45))
+                dist += 1
+            # faixa de cor: preto mais escuro e branco mais claro dos últimos ~10 s
+            if self.n % 6 == 0:
+                a16 = amostra.astype(np.uint16)
+                plano = ((a16[..., 0] + 2 * a16[..., 1] + a16[..., 2]) >> 2).reshape(-1)   # brilho
+                k = max(1, len(plano) // 400)      # ignora 0,25% de cada ponta (ruído e bordas do MJPEG)
+                part = np.partition(plano, (k, len(plano) - 1 - k))
+                faixas.append((int(part[k]), int(part[len(plano) - 1 - k])))
+                if self.n % 60 == 0 and len(faixas) >= 20:
+                    lo = min(f[0] for f in faixas)
+                    hi = max(f[1] for f in faixas)
+                    if lo >= 12 and hi <= 240 and hi - lo > 120:
+                        self.faixa_detectada = "limitada"
+                    elif lo < 9 or hi > 246:
+                        self.faixa_detectada = "completa"
+            self.t = estimado
             self.quadro = q
             self.tamanho = (q.shape[1], q.shape[0])
             self.n += 1
             self.novo.set()
+            # prévia da aba já pronta aqui, fora da interface (deixa o app leve)
+            alvo = self.previa_tam
+            if alvo and (dif > 0.35 or self.previa is None or getattr(self, "_previa_alvo", None) != alvo):
+                try:
+                    pw, ph = alvo
+                    esc = min(pw / q.shape[1], ph / q.shape[0])
+                    nw, nh = max(2, int(q.shape[1] * esc)), max(2, int(q.shape[0] * esc))
+                    pq = cv2.resize(q, (nw, nh), interpolation=cv2.INTER_AREA if esc < 1 else cv2.INTER_LINEAR)
+                    self.previa = Image.frombuffer("RGB", (nw, nh), pq.tobytes(), "raw", "BGR", 0, 1)
+                    self._previa_alvo = alvo
+                    self.previa_n += 1
+                except Exception:
+                    pass
             cont += 1
             agora = time.time()
             if agora - t0 >= 1:
-                self.fps, cont, t0 = cont / (agora - t0), 0, agora
+                self.fps, self.fps_distintos = cont / (agora - t0), dist / (agora - t0)
+                cont, dist, t0 = 0, 0, agora
             if intervalo:
                 time.sleep(intervalo)
         cap.release()
@@ -4211,7 +4661,15 @@ class Tela:
         modo = self.tl_m_modo.get()
         self.cfg.update(tela_video=self.tl_m_video.get(), tela_audio=self.tl_m_audio.get(), tela_modo=modo)
         self.salvar_cfg()
-        self.tl_cap = Captura(fonte, MODOS_TELA.get(modo, (1920, 1080, 60)))
+        nome_v = self.tl_m_video.get()
+        chave_fmt = f"{nome_v}|{modo}"
+        salvos = self.cfg.setdefault("tela_formatos_ok", {})
+
+        def escolheu(fcc, _k=chave_fmt):
+            salvos[_k] = fcc
+        self.tl_cap = Captura(fonte, MODOS_TELA.get(modo, (1920, 1080, 60)),
+                              formato=self.cfg.get("tela_formato", "Automático"), preferido=salvos.get(chave_fmt),
+                              ao_escolher=escolheu)
         self.tl_ultimo = -1
         self.tl_geracao = getattr(self, "tl_geracao", 0) + 1
         self.c.itemconfig(self.tl_aviso, text="Conectando à placa…")
@@ -4251,13 +4709,24 @@ class Tela:
             self.tl_btn.configure(text="▶  Iniciar", fg_color="#0070D1", hover_color="#1888F0", text_color=BRANCO)
 
     # ---- desenho
-    def _tl_converter(self, quadro, larg, alt):
-        import cv2
-        h, w = quadro.shape[:2]
-        esc = min(larg / w, alt / h)
-        nw, nh = max(2, int(w * esc)), max(2, int(h * esc))
-        rgb = cv2.cvtColor(cv2.resize(quadro, (nw, nh), interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
-        return Image.frombuffer("RGB", (nw, nh), rgb.tobytes(), "raw", "RGB", 0, 1)
+    def _tl_texto_gpu(self, g, cap):
+        txt = traduzir(f"Tela cheia na placa de vídeo • {g.fps:.0f} fps na tela")
+        m = g.interp_modo
+        if m and not g.ia_falhou:
+            txt += traduzir(f" (jogo a {g.fonte_fps:.0f}) • fluidez {texto_interp(m)}")
+            if g.ia_info:
+                txt += traduzir(f" • {g.ia_info} • atraso {g.atraso_ms:.0f} ms")
+            if m != INTERP_NATIVO and g.hz_monitor and g.fonte_fps * m > g.hz_monitor * 1.05:
+                txt += traduzir(f" • passa dos {g.hz_monitor} Hz do monitor: use um x menor ou Nativo")
+        elif m and g.ia_falhou:
+            txt += traduzir(" • fluidez indisponível nesta placa de vídeo")
+        if g.fsr:
+            txt += traduzir(" • FSR")
+        if g.faixa_atual == "Limitada":
+            txt += traduzir(" • cor 16-235 corrigida")
+        if cap.formato_usado:
+            txt += " • " + traduzir(cap.formato_usado)
+        return txt
 
     def tl_desenhar(self, geracao=None):
         cap = getattr(self, "tl_cap", None)
@@ -4271,33 +4740,25 @@ class Tela:
                           if erro == "abrir" else "A placa parou de mandar imagem. Confira o cabo HDMI e o PS3.")
             return
         if getattr(self, "tl_gpu", None):
-            if cap.n % 30 == 0:
-                g = self.tl_gpu
-                txt = f"Tela cheia na placa de vídeo • {g.fps:.0f} fps na tela"
-                m = g.interp_modo
-                if m:
-                    txt += f" (jogo a {g.fonte_fps:.0f}) • interpolação {texto_interp(m)}"
-                if m and g.modo_rapido:
-                    txt += " • movimento: modo rápido"
-                if g.fsr:
-                    txt += " • FSR"
-                if m and m != INTERP_NATIVO and g.hz_monitor and g.fonte_fps * m > g.hz_monitor * 1.05:
-                    txt += f" • passa dos {g.hz_monitor} Hz do monitor: use um x menor ou Nativo"
-                if self.aba == "tela":
-                    self.c.itemconfig(self.tl_info, text=txt)
-            prox(50)
+            cap.previa_tam = None          # a tela cheia está na frente: a prévia não gasta nada
+            if self.aba == "tela" and (cap.n // 30) != getattr(self, "_tl_ult_info", -1):
+                self._tl_ult_info = cap.n // 30
+                self.c.itemconfig(self.tl_info, text=self._tl_texto_gpu(self.tl_gpu, cap))
+            prox(100)
             return
         if self.aba != "tela" and not self.tl_cheia:
-            prox(100)        # em outra aba: a placa e o som continuam, só não desenha a prévia
+            cap.previa_tam = None          # em outra aba: a placa e o som continuam, sem gastar com a prévia
+            prox(150)
             return
-        if cap.n != self.tl_ultimo and cap.quadro is not None:
-            self.tl_ultimo = cap.n
-            if self.tl_cheia:
-                cv_, item, larg, alt = self.tl_cheia["c"], self.tl_cheia["item"], self.tl_cheia["w"], self.tl_cheia["h"]
-            else:
-                cv_, item = self.c, self.tl_item
-                larg, alt = self.p.px(self.PREV_W), self.p.px(self.PREV_H)
-            img = self._tl_converter(cap.quadro, larg, alt)
+        if self.tl_cheia:
+            cv_, item, larg, alt = self.tl_cheia["c"], self.tl_cheia["item"], self.tl_cheia["w"], self.tl_cheia["h"]
+        else:
+            cv_, item = self.c, self.tl_item
+            larg, alt = self.p.px(self.PREV_W), self.p.px(self.PREV_H)
+        cap.previa_tam = (larg, alt)
+        img = cap.previa
+        if img is not None and cap.previa_n != getattr(self, "_tl_previa_n", -1):
+            self._tl_previa_n = cap.previa_n
             if self.tl_foto is None or (self.tl_foto.width(), self.tl_foto.height()) != img.size or \
                     getattr(self, "_tl_alvo", None) is not cv_:
                 self.tl_foto = ImageTk.PhotoImage(img)
@@ -4308,13 +4769,18 @@ class Tela:
             if not self.tl_cheia and self.c.itemcget(self.tl_aviso, "text"):
                 self.c.itemconfig(self.tl_aviso, text="")
                 self.c.itemconfig(self.tl_aviso2, text="")
-            if cap.n % 15 == 0 and not self.tl_cheia:
-                w_, h_ = cap.tamanho or (0, 0)
-                txt = f"{w_}×{h_} • {cap.fps:.0f} fps"
-                if self.tl_audio_msg:
-                    txt += f"   {self.tl_audio_msg}"
-                self.c.itemconfig(self.tl_info, text=txt)
-        prox(4)
+        if not self.tl_cheia and (cap.n // 15) != getattr(self, "_tl_ult_info", -1) and cap.quadro is not None:
+            self._tl_ult_info = cap.n // 15
+            w_, h_ = cap.tamanho or (0, 0)
+            txt = f"{w_}×{h_} • {cap.fps:.0f} fps"
+            if cap.fps_distintos and cap.fps_distintos < cap.fps * 0.9:
+                txt += traduzir(f" (jogo a {cap.fps_distintos:.0f})")
+            if cap.formato_usado:
+                txt += " • " + traduzir(cap.formato_usado)
+            if self.tl_audio_msg:
+                txt += "   " + traduzir(self.tl_audio_msg)
+            self.c.itemconfig(self.tl_info, text=txt)
+        prox(8)
 
     def _tl_mudou_fsr(self):
         v = bool(self.tl_fsr.get())
@@ -4329,48 +4795,119 @@ class Tela:
             self.tl_gpu.definir_interp(INTERP_OPCOES[nome])
 
     # ---- opções de imagem
+    def _tl_opcoes(self):
+        return dict(nitidez=float(self.cfg.get("tela_nitidez", 0.5)), faixa=self.cfg.get("tela_faixa", "Automática"),
+                    vsync=bool(self.cfg.get("tela_vsync", True)), ia=self.cfg.get("tela_ia", "Automática"))
+
+    def _tl_aplicar_opcoes(self):
+        if getattr(self, "tl_gpu", None):
+            self.tl_gpu.definir_opcoes(**self._tl_opcoes())
+
     def tl_opcoes_imagem(self):
-        j = self._janela("Imagem", 460, 500)
+        j = self._janela("Imagem", 500, 640)
         f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
         f_txt = ctk.CTkFont(family=F_REG, size=12)
         f_rot = ctk.CTkFont(family=F_SEMI, size=13)
         ctk.CTkLabel(j, text="Imagem na tela cheia", font=f_tit, text_color=BRANCO).pack(anchor="w", padx=24,
-                                                                                         pady=(20, 10))
-        ctk.CTkSwitch(j, text="FSR 1 — mais nitidez ao ampliar", variable=self.tl_fsr, font=f_rot,
-                      progress_color="#0070D1", button_color="#E5ECF8", fg_color="#2A3A5E",
-                      command=self._tl_mudou_fsr).pack(anchor="w", padx=24)
-        ctk.CTkLabel(j, text=f"Não muda a quantidade de quadros. Atalho na tela cheia: {self.nome_tecla('fsr')}.",
-                     font=f_txt,
-                     text_color=CINZA, wraplength=360, justify="left").pack(anchor="w", padx=(70, 24))
-        ctk.CTkLabel(j, text="Interpolação de quadros", font=f_rot, text_color=BRANCO).pack(anchor="w", padx=24,
-                                                                                            pady=(18, 4))
-        menu = ctk.CTkSegmentedButton(j, values=list(INTERP_OPCOES), font=f_txt, height=34,
-                                      selected_color="#0070D1", selected_hover_color="#1888F0",
-                                      unselected_color="#16233F", unselected_hover_color="#20345C",
-                                      command=self._tl_mudou_interp)
-        menu.set(self.tl_interp)
-        menu.pack(fill="x", padx=24)
-        ctk.CTkLabel(j, text="Cria quadros intermediários a partir do movimento da imagem. x2 dobra os quadros do "
-                             "jogo (30 → 60), x4 quadruplica (30 → 120) e assim por diante, sempre no mesmo ritmo. "
-                             "Nativo acompanha o Hz do seu monitor, sincronizado com ele: é o mais suave. "
-                             "Acrescenta cerca de 1 quadro do jogo de atraso. "
-                             f"Atalho na tela cheia: {self.nome_tecla('interp')}.",
-                     font=f_txt, text_color=CINZA, wraplength=410, justify="left").pack(anchor="w", padx=24,
-                                                                                      pady=(8, 0))
-        self.tl_compat = tk.BooleanVar(value=self.cfg.get("tela_compativel", True))
-        ctk.CTkSwitch(j, text="Compatível com Discord e OBS", variable=self.tl_compat, font=f_rot,
-                      progress_color="#0070D1", button_color="#E5ECF8", fg_color="#2A3A5E",
-                      command=lambda: self.cfg.update(tela_compativel=bool(self.tl_compat.get()))).pack(
-            anchor="w", padx=24, pady=(18, 0))
-        ctk.CTkLabel(j, text="Evita que a transmissão trave com a tela cheia em foco. Desligue só se não for "
-                             "transmitir. Vale na próxima vez que abrir a tela cheia.\n"
-                             f"Com outra janela em foco, use Ctrl+Shift+{self.nome_tecla('fsr')} (FSR) e "
-                             f"Ctrl+Shift+{self.nome_tecla('interp')} (interpolação).",
-                     font=f_txt, text_color=CINZA, wraplength=360, justify="left").pack(anchor="w", padx=(70, 24))
+                                                                                         pady=(20, 6))
+        corpo = ctk.CTkScrollableFrame(j, fg_color="transparent", scrollbar_button_color="#26324D")
+        corpo.pack(fill="both", expand=True, padx=(10, 6))
         ctk.CTkButton(j, text="OK", height=38, width=110, corner_radius=19, fg_color="#0070D1",
                       hover_color="#1888F0", font=ctk.CTkFont(family=F_SEMI, size=14),
                       command=lambda: (self.salvar_cfg(), j.destroy())).pack(side="bottom", anchor="e", padx=24,
-                                                                           pady=20)
+                                                                           pady=(8, 16))
+
+        def titulo(txt, topo=18):
+            ctk.CTkLabel(corpo, text=txt, font=f_rot, text_color=BRANCO).pack(anchor="w", padx=14, pady=(topo, 4))
+
+        def explica(txt, recuo=14):
+            ctk.CTkLabel(corpo, text=txt, font=f_txt, text_color=CINZA, wraplength=420 - recuo,
+                         justify="left").pack(anchor="w", padx=(recuo, 14), pady=(4, 0))
+
+        def segmentado(valores, atual, ao_mudar):
+            m = ctk.CTkSegmentedButton(corpo, values=list(valores), font=f_txt, height=32,
+                                       selected_color="#0070D1", selected_hover_color="#1888F0",
+                                       unselected_color="#16233F", unselected_hover_color="#20345C",
+                                       command=ao_mudar)
+            m.set(atual)
+            m.pack(fill="x", padx=14)
+            return m
+
+        def chave(texto, var, ao_mudar):
+            ctk.CTkSwitch(corpo, text=texto, variable=var, font=f_rot, progress_color="#0070D1",
+                          button_color="#E5ECF8", fg_color="#2A3A5E", command=ao_mudar).pack(anchor="w", padx=14,
+                                                                                           pady=(18, 0))
+
+        # ---- nitidez e ampliação
+        chave("FSR 1 — ampliação e nitidez da AMD", self.tl_fsr, self._tl_mudou_fsr)
+        explica("Amplia a imagem para o tamanho do seu monitor sem borrar (EASU) e realça os detalhes sem "
+                f"criar contornos (RCAS). Atalho na tela cheia: {self.nome_tecla('fsr')}.", 60)
+        linha = ctk.CTkFrame(corpo, fg_color="transparent")
+        linha.pack(fill="x", padx=(60, 14), pady=(8, 0))
+        ctk.CTkLabel(linha, text="Nitidez", font=f_txt, text_color=BRANCO).pack(side="left")
+        rot_nit = ctk.CTkLabel(linha, text="", font=f_txt, text_color=CINZA, width=40)
+        rot_nit.pack(side="right")
+
+        def mudou_nit(v):
+            self.cfg["tela_nitidez"] = round(float(v), 2)
+            rot_nit.configure(text=f"{round(float(v) * 100)}%")
+            self._tl_aplicar_opcoes()
+        sl = ctk.CTkSlider(linha, from_=0, to=1, number_of_steps=20, height=16, button_color="#E5ECF8",
+                           progress_color="#0070D1", fg_color="#22304D", command=mudou_nit)
+        sl.set(float(self.cfg.get("tela_nitidez", 0.5)))
+        sl.pack(side="left", fill="x", expand=True, padx=10)
+        mudou_nit(sl.get())
+
+        # ---- fluidez
+        titulo("Fluidez com IA (interpolação de quadros)")
+        segmentado(INTERP_OPCOES, self.tl_interp, self._tl_mudou_interp)
+        explica("Uma rede neural (RIFE) roda na sua placa de vídeo e cria os quadros que faltam entre dois quadros "
+                "do jogo. x2 dobra (30 → 60), x4 quadruplica e Nativo acompanha o Hz do seu monitor: é o mais "
+                "suave. Acrescenta cerca de 1 quadro do jogo de atraso. "
+                f"Atalho na tela cheia: {self.nome_tecla('interp')}.")
+        titulo("Precisão da IA", 12)
+
+        def mudou_ia(v):
+            self.cfg["tela_ia"] = v
+            self._tl_aplicar_opcoes()
+        segmentado(NIVEIS_IA, self.cfg.get("tela_ia", "Automática"), mudou_ia)
+        explica("Automática escolhe sozinha conforme a folga da placa de vídeo. Alta acerta melhor objetos "
+                "pequenos e rápidos; Leve serve para placas de vídeo mais simples.")
+
+        # ---- cor e sinal
+        titulo("Faixa de cor")
+
+        def mudou_faixa(v):
+            self.cfg["tela_faixa"] = v
+            self._tl_aplicar_opcoes()
+        segmentado(FAIXAS_COR, self.cfg.get("tela_faixa", "Automática"), mudou_faixa)
+        explica("Corrige preto acinzentado e cores lavadas quando o PS3 manda RGB Limitado (o padrão dele) e a "
+                "placa mostra como Completo. Automática descobre sozinha em alguns segundos.")
+        titulo("Formato da placa de captura")
+
+        def mudou_formato(v):
+            self.cfg["tela_formato"] = v
+        segmentado(FORMATOS_CAPTURA, self.cfg.get("tela_formato", "Automático"), mudou_formato)
+        explica("Sem compressão não tem os quadradinhos do MJPEG e gasta menos processador, mas precisa de uma "
+                "placa USB 3.0. Automático testa e escolhe. Vale na próxima vez que clicar em Iniciar.")
+
+        # ---- ritmo e transmissão
+        self.tl_vsync = tk.BooleanVar(value=self.cfg.get("tela_vsync", True))
+
+        def mudou_vsync():
+            self.cfg["tela_vsync"] = bool(self.tl_vsync.get())
+            self._tl_aplicar_opcoes()
+        chave("Sincronizar com o monitor (sem rasgos)", self.tl_vsync, mudou_vsync)
+        explica("Troca a imagem no ritmo do monitor: acaba com as linhas cortando a tela e deixa o movimento "
+                "regular. Desligado tem um pouco menos de atraso.", 60)
+        self.tl_compat = tk.BooleanVar(value=self.cfg.get("tela_compativel", True))
+        chave("Compatível com Discord e OBS", self.tl_compat,
+              lambda: self.cfg.update(tela_compativel=bool(self.tl_compat.get())))
+        explica("Evita que a transmissão trave com a tela cheia em foco. Desligue só se não for "
+                "transmitir. Vale na próxima vez que abrir a tela cheia.\n"
+                f"Com outra janela em foco, use Ctrl+Shift+{self.nome_tecla('fsr')} (FSR) e "
+                f"Ctrl+Shift+{self.nome_tecla('interp')} (fluidez).", 60)
+        ctk.CTkFrame(corpo, fg_color="transparent", height=10).pack()
 
     # ---- tela cheia
     def tl_tela_cheia(self):
@@ -4394,7 +4931,7 @@ class Tela:
             self.tl_gpu = TelaCheiaGPU(self.tl_cap, bool(self.tl_fsr.get()), fechou, mudou_fsr,
                                        INTERP_OPCOES.get(self.tl_interp, 0), mudou_interp,
                                        {"fsr": self.atalho("fsr"), "interp": self.atalho("interp")},
-                                       compativel=self.cfg.get("tela_compativel", True))
+                                       compativel=self.cfg.get("tela_compativel", True), opcoes=self._tl_opcoes())
             return
         self._tl_cheia_tk()
 
@@ -4828,10 +5365,10 @@ class Conversor:
             if info.get("tam"):
                 detalhes.append(formatar_tamanho(info["tam"]))
             if info.get("tipo"):
-                detalhes.append("Pasta de jogo" if info["tipo"] == "pasta" else "PKG")
+                detalhes.append(traduzir("Pasta de jogo") if info["tipo"] == "pasta" else "PKG")
             txt = "  •  ".join(detalhes)
             if info.get("aviso"):
-                txt += ("\n" if txt else "") + info["aviso"]
+                txt += ("\n" if txt else "") + traduzir(info["aviso"])
             lb_info.configure(text=txt, text_color=CINZA if info["ok"] and not info.get("aviso") else
                               ("#FBBF24" if info["ok"] else "#F87171"))
             b_conv.configure(state="normal" if info["ok"] else "disabled")
@@ -5393,8 +5930,8 @@ class Updates:
             sub = j["id"] + (f"  •  v{j['instalado']}" if j["instalado"] else "")
             if isinstance(info, dict):
                 falta = len(self._up_faltando(j["id"]))
-                sub += f"  •  {falta} update(s) novo(s)" if falta else ("  •  atualizado" if info["pacotes"]
-                                                                        else "  •  sem updates")
+                sub += traduzir(f"  •  {falta} update(s) novo(s)" if falta else ("  •  atualizado" if info["pacotes"]
+                                                                                 else "  •  sem updates"))
             s = ctk.CTkLabel(linha, text=sub, font=f_sub, text_color="#7FB2F0" if sel else CINZA_ESCURO, anchor="w")
             s.pack(fill="x", padx=10, pady=(0, 6))
             for w_ in (linha, n, s):
@@ -6254,6 +6791,23 @@ class TropUsr:
         return True
 
 
+def _tropusr_mudar_tempo(self, i, t):
+    """Troca o horário de um troféu já ganho (só no console)."""
+    struct.pack_into(">QQ", self.d, self.tempos[i] + 16, t, t)
+
+
+def _tropusr_fechar_tempos(self, agora):
+    """Depois de mudar horários: "último troféu" = o mais novo dos ganhos; "última atualização" = agora."""
+    ts = [struct.unpack_from(">Q", self.d, self.tempos[i] + 16)[0] for i in range(self.total) if self.info(i)["destravado"]]
+    if ts:
+        struct.pack_into(">QQ", self.d, self.lista + 64, max(ts), max(ts))
+    struct.pack_into(">QQ", self.d, self.lista + 32, agora, agora)
+
+
+TropUsr.mudar_tempo = _tropusr_mudar_tempo
+TropUsr.fechar_tempos = _tropusr_fechar_tempos
+
+
 class TropTrns:
     def __init__(self, dados):
         self.d = bytearray(dados)
@@ -6313,6 +6867,14 @@ class TropTrns:
         tid, t1, t2 = struct.unpack_from(">I", self.d, o + 32)[0], *struct.unpack_from(">QQ", self.d, o + 48)
         if tipo_b != self.tipo_bloco or tam != self.passo - 16 or exist or sync or tid or t1 or t2:
             raise ErroTrofeu("o espaço livre do TROPTRNS.DAT não está vazio. Nada foi alterado.")
+
+    def mudar_tempo(self, i, t):
+        for k in range(1, self.contagem):
+            o = self.ini + k * self.passo + 16
+            if struct.unpack_from(">I", self.d, o + 32)[0] == i:
+                struct.pack_into(">QQ", self.d, o + 48, t, t)
+                return True
+        return False
 
     def destravar(self, i, tipo, t):
         if any(g["id"] == i for g in self.ganhos()):
@@ -6419,6 +6981,81 @@ def destravar_trofeus(arquivos, ids, agora=None):
         raise ErroTrofeu("O TROPTRNS.DAT novo não conferiu. Nada foi alterado.")
     novos["PARAM.PFD"] = novo_pfd
     return novos, feitos, pulou_platina
+
+
+DATA_MINIMA_TROFEU = 1163203200      # 11/11/2006, lançamento do PS3
+
+
+def formato_data():
+    """dd/mm/aaaa em português e espanhol; mm/dd/yyyy em inglês."""
+    return "%m/%d/%Y" if IDIOMA.get("atual") == "en" else "%d/%m/%Y"
+
+
+def _abrir_trofeus(arquivos):
+    """Confere assinatura e coerência; devolve (pfd, usr, trns)."""
+    pfd = Pfd(arquivos["PARAM.PFD"])
+    erros = pfd.conferir(arquivos)
+    if erros:
+        raise ErroTrofeu("A assinatura atual destes troféus não bateu com o cálculo do PSTudo "
+                         f"({', '.join(erros[:4])}). Por segurança, nada foi alterado.")
+    usr = TropUsr(arquivos["TROPUSR.DAT"])
+    trns = TropTrns(pfd.decifrar("TROPTRNS.DAT", arquivos["TROPTRNS.DAT"]))
+    if usr.npcomm and trns.npcomm and usr.npcomm != trns.npcomm:
+        raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT são de jogos diferentes.")
+    trns.conferir_formato(usr.total)
+    ganhos = {g["id"] for g in trns.ganhos()}
+    if ganhos != {i for i in range(usr.total) if usr.info(i)["destravado"]}:
+        raise ErroTrofeu("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre os troféus ganhos. Nada foi alterado.")
+    return pfd, usr, trns
+
+
+def _fechar_trofeus(arquivos, pfd, usr, trns):
+    """Cifra, assina de novo e confere o resultado. Devolve {nome: bytes novos}."""
+    novo_usr = bytes(usr.d)
+    novo_trns = pfd.cifrar("TROPTRNS.DAT", bytes(trns.d))
+    novo_trns = novo_trns + arquivos["TROPTRNS.DAT"][len(novo_trns):]   # mantém o tamanho do arquivo
+    novos = {"TROPUSR.DAT": novo_usr, "TROPTRNS.DAT": novo_trns}
+    novo_pfd = pfd.atualizar(novos)
+    final = dict(arquivos)
+    final.update(novos)
+    final["PARAM.PFD"] = novo_pfd
+    p2 = Pfd(novo_pfd)
+    if p2.conferir(final):
+        raise ErroTrofeu("A assinatura nova não conferiu. Nada foi alterado.")
+    if TropTrns(p2.decifrar("TROPTRNS.DAT", novo_trns)).contagem != trns.contagem:
+        raise ErroTrofeu("O TROPTRNS.DAT novo não conferiu. Nada foi alterado.")
+    novos["PARAM.PFD"] = novo_pfd
+    return novos
+
+
+def mudar_datas_trofeus(arquivos, novas, agora=None):
+    """novas = {id: segundos unix}. Muda a data e a hora de troféus já ganhos que nunca foram para a PSN.
+    Devolve ({nome: bytes novos}, quantos mudaram)."""
+    agora = agora or time.time()
+    pfd, usr, trns = _abrir_trofeus(arquivos)
+    feitos = 0
+    for i, quando in sorted(novas.items()):
+        if not 0 <= i < usr.total:
+            continue
+        info = usr.info(i)
+        if not info["destravado"]:
+            raise ErroTrofeu(f"o troféu {i} não está ganho. Nada foi alterado.")
+        g = next((g for g in trns.ganhos() if g["id"] == i), None)
+        if info["sync"] or (g and g["sync"]):
+            raise ErroTrofeu("um dos troféus já foi para a PSN; a data dele não pode mudar. Nada foi alterado.")
+        if not DATA_MINIMA_TROFEU <= quando <= agora + 60:
+            raise ErroTrofeu("a data precisa ficar entre 11/11/2006 e agora. Nada foi alterado.")
+        t = tempo_ps3(int(quando))
+        if t == info["tempo"]:
+            continue
+        usr.mudar_tempo(i, t)
+        if not trns.mudar_tempo(i, t):
+            raise ErroTrofeu("o troféu não está no TROPTRNS.DAT. Nada foi alterado.")
+        feitos += 1
+    if not feitos:
+        return {}, 0
+    usr.fechar_tempos(max(tempo_ps3(agora), usr.maior_tempo()))
+    return _fechar_trofeus(arquivos, pfd, usr, trns), feitos
 
 
 def resumo_trofeus(arquivos):
@@ -6639,6 +7276,8 @@ class Trofeus:
         acoes.grid(row=0, column=1, sticky="e")
         self.tr_btn_restaurar = botao(acoes, "Desfazer", self.tr_restaurar)
         self.tr_btn_restaurar.pack(side="left", padx=(0, 6))
+        self.tr_btn_datas = botao(acoes, "Data e hora", self.tr_datas)
+        self.tr_btn_datas.pack(side="left", padx=(0, 6))
         self.tr_btn_todos = botao(acoes, "Marcar os que faltam", self.tr_marcar_todos)
         self.tr_btn_todos.pack(side="left", padx=(0, 6))
         self.tr_btn_destravar = botao(acoes, "Destravar", self.tr_destravar, "azul")
@@ -6665,6 +7304,8 @@ class Trofeus:
         faltam = [t for t in info["trofeus"] if not t["destravado"]] if isinstance(info, dict) else []
         self.tr_btn_ler.configure(state="normal" if livre else "disabled")
         self.tr_btn_todos.configure(state="normal" if livre and faltam else "disabled")
+        editaveis = [t for t in info["trofeus"] if t["destravado"] and not t["sync"]] if isinstance(info, dict) else []
+        self.tr_btn_datas.configure(state="normal" if livre and editaveis else "disabled")
         n = len(st["marcados"])
         self.tr_btn_destravar.configure(state="normal" if livre and n else "disabled",
                                         text=f"Destravar {n}" if n else "Destravar")
@@ -6761,7 +7402,8 @@ class Trofeus:
             ctk.CTkLabel(col, text=sub if len(sub) <= 80 else sub[:79] + "…", font=f_sub, text_color=CINZA,
                          anchor="w", justify="left").pack(fill="x")
             if t["destravado"]:
-                quando = time.strftime("%d/%m/%Y", time.localtime(tempo_unix(t["tempo"]))) if t["tempo"] else ""
+                quando = time.strftime(formato_data() + "  %H:%M", time.localtime(tempo_unix(t["tempo"]))) \
+                    if t["tempo"] else ""
                 ctk.CTkLabel(linha, text=("na PSN" if t["sync"] else "ganho") + (f"\n{quando}" if quando else ""),
                              font=f_sub, text_color="#34D399" if t["sync"] else "#7FB2F0").pack(side="right", padx=12)
 
@@ -6926,6 +7568,148 @@ class Trofeus:
             self._tr_botoes()
         self.em_thread(trabalho, ok, erro, fim)
 
+    def _tr_aplicar(self, msg_inicio, mexer, ao_terminar):
+        """Backup no PC, mexer(arquivos) -> (novos, n), grava no PS3 e guarda "depois" para o Desfazer."""
+        st = self._tr()
+        cod, u = st["sel"], st["usuario"]
+        jogo = next((j for j in st["jogos"] or [] if j["codigo"] == cod), None)
+        if st["ocupado"] or not jogo:
+            return
+        st["ocupado"] = True
+        self._tr_botoes()
+        self._tr_msg(msg_inicio)
+
+        def trabalho(ftp):
+            arqs = baixar_pasta_trofeu(ftp, jogo["pasta"])
+            for nome in ("PARAM.PFD", "TROPUSR.DAT", "TROPTRNS.DAT"):
+                if nome not in arqs:
+                    raise ErroTrofeu(f"{nome} não existe nesta pasta")
+            pasta = os.path.join(pasta_backup_trofeus(u, cod), time.strftime("%Y-%m-%d_%H-%M-%S"))
+            os.makedirs(pasta, exist_ok=True)
+            for nome, dados in arqs.items():                  # backup antes de tudo
+                with open(os.path.join(pasta, nome), "wb") as f:
+                    f.write(dados)
+            novos, n = mexer(arqs)
+            if not n:
+                return 0
+            self.fila.put(("cb", lambda: self._tr_msg("Gravando no PS3…")))
+            try:
+                gravar_trofeus_ps3(ftp, jogo["pasta"], novos, arqs)
+            except Exception as e:
+                raise ErroTrofeu(f"{e}. O PSTudo voltou os arquivos originais; a cópia de segurança "
+                                 "está em Backups.") from None
+            depois = os.path.join(pasta, "depois")         # como ficou: o Desfazer confere antes de voltar
+            os.makedirs(depois, exist_ok=True)
+            for nome, dados in novos.items():
+                with open(os.path.join(depois, nome), "wb") as f:
+                    f.write(dados)
+            return n
+
+        def ok(n):
+            ao_terminar(n)
+            self.tr_escolher(cod, recarregar=True)
+
+        def erro(e):
+            self._tr_msg(f"Não mudei: {str(e)[:150]}", "#F87171")
+
+        def fim():
+            st["ocupado"] = False
+            self._tr_botoes()
+        self.em_thread(trabalho, ok, erro, fim)
+
+    def tr_datas(self):
+        """Janela para escolher a data e a hora dos troféus ganhos que ainda não foram para a PSN."""
+        st = self._tr()
+        info = st["lista"].get(st["sel"])
+        if not isinstance(info, dict) or st["ocupado"]:
+            return
+        editaveis = [t for t in info["trofeus"] if t["destravado"] and not t["sync"]]
+        if not editaveis:
+            return
+        fmt = formato_data()
+        j = self._janela("Data e hora", 600, 600)
+        f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
+        f_txt = ctk.CTkFont(family=F_REG, size=12)
+        f_n = ctk.CTkFont(family=F_SEMI, size=12)
+        ctk.CTkLabel(j, text="Data e hora dos troféus", font=f_tit, text_color=BRANCO).pack(anchor="w", padx=24,
+                                                                                            pady=(20, 2))
+        ctk.CTkLabel(j, text="Muda só no seu PS3, para a lista ficar do seu jeito. Troféus que já foram para a PSN "
+                             "não aparecem aqui. Continue sem sincronizar com a PSN.",
+                     font=f_txt, text_color=CINZA, wraplength=540, justify="left").pack(anchor="w", padx=24)
+        exemplo = time.strftime(fmt, time.localtime())
+        todos = ctk.CTkFrame(j, fg_color="transparent")
+        todos.pack(fill="x", padx=24, pady=(12, 6))
+        ctk.CTkLabel(todos, text="Mudar a data de todos para", font=f_txt, text_color=BRANCO).pack(side="left")
+        e_todos = ctk.CTkEntry(todos, width=110, height=30, corner_radius=8, fg_color="#111C33",
+                               border_color="#26324D", font=f_txt, placeholder_text=exemplo)
+        e_todos.pack(side="left", padx=8)
+        lista = ctk.CTkScrollableFrame(j, fg_color="#0B1426", corner_radius=12, scrollbar_button_color="#1E2A44")
+        lista.pack(fill="both", expand=True, padx=24, pady=(4, 0))
+        campos = {}
+        for t in editaveis:
+            linha = ctk.CTkFrame(lista, fg_color="#0F1B33", corner_radius=10)
+            linha.pack(fill="x", pady=2, padx=(0, 4))
+            nome = t["nome"]
+            ctk.CTkLabel(linha, text=nome if len(nome) <= 34 else nome[:33] + "…", font=f_n, text_color=BRANCO,
+                         anchor="w").pack(side="left", padx=10, pady=8)
+            atual = time.localtime(tempo_unix(t["tempo"])) if t["tempo"] else time.localtime()
+            e_h = ctk.CTkEntry(linha, width=64, height=28, corner_radius=8, fg_color="#111C33", border_color="#26324D",
+                               font=f_txt)
+            e_h.insert(0, time.strftime("%H:%M", atual))
+            e_h.pack(side="right", padx=(4, 10))
+            e_d = ctk.CTkEntry(linha, width=104, height=28, corner_radius=8, fg_color="#111C33",
+                               border_color="#26324D", font=f_txt)
+            e_d.insert(0, time.strftime(fmt, atual))
+            e_d.pack(side="right")
+            campos[t["id"]] = (e_d, e_h, t)
+
+        def aplicar_todos():
+            v = e_todos.get().strip()
+            if v:
+                for e_d, _e_h, _t in campos.values():
+                    e_d.delete(0, "end")
+                    e_d.insert(0, v)
+        ctk.CTkButton(todos, text="Aplicar", width=80, height=30, corner_radius=15, fg_color=BTN,
+                      hover_color=BTN_HOVER, font=f_n, command=aplicar_todos).pack(side="left")
+        rodape = ctk.CTkFrame(j, fg_color="transparent")
+        rodape.pack(fill="x", padx=24, pady=14)
+        aviso = ctk.CTkLabel(rodape, text="", font=f_txt, text_color="#F87171", wraplength=360, justify="left")
+        aviso.pack(side="left")
+
+        def salvar():
+            novas = {}
+            for tid, (e_d, e_h, t) in campos.items():
+                texto = f"{e_d.get().strip()} {e_h.get().strip()}"
+                try:
+                    try:
+                        st_ = time.strptime(texto, fmt + " %H:%M")
+                    except ValueError:
+                        st_ = time.strptime(texto, fmt + " %H:%M:%S")
+                except ValueError:
+                    aviso.configure(text=f"Data ou hora inválida em \"{t['nome'][:30]}\" (use {exemplo} e 21:30).")
+                    return
+                quando = time.mktime(st_)
+                if not DATA_MINIMA_TROFEU <= quando <= time.time() + 60:
+                    aviso.configure(text=f"\"{t['nome'][:30]}\": a data precisa ficar entre 11/11/2006 e agora.")
+                    return
+                if abs(quando - tempo_unix(t["tempo"])) >= 60 or not t["tempo"]:   # só o que mudou de verdade
+                    novas[tid] = quando
+            j.destroy()
+            if not novas:
+                return
+
+            def terminou(n):
+                if n:
+                    self._tr_msg(f"✓ Data e hora de {n} troféu(s) mudadas. Reinicie o PS3 para ver. "
+                                 "Não sincronize com a PSN.", "#34D399")
+                else:
+                    self._tr_msg("Nada mudou.", CINZA)
+            self._tr_aplicar("Fazendo backup e mudando as datas… (deixe o PS3 no XMB, sem jogo aberto)",
+                             lambda arqs: mudar_datas_trofeus(arqs, novas), terminou)
+        ctk.CTkButton(rodape, text="Salvar", width=120, height=38, corner_radius=19, fg_color="#0070D1",
+                      hover_color="#1888F0", font=ctk.CTkFont(family=F_SEMI, size=14), command=salvar).pack(
+            side="right")
+
     def tr_restaurar(self):
         """Volta os troféus do jogo escolhido para o backup mais recente."""
         st = self._tr()
@@ -7020,6 +7804,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self.root.iconphoto(True, self._icone)
 
         self.cfg = self.carregar_cfg()
+        carregar_idioma(self.cfg.get("idioma", "pt"))
         self.jogos = []
         self.estado_ps3 = "busca"
         self.fila = queue.Queue()
@@ -7550,7 +8335,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self._janela_cfg = j
         j.title("Configurações")
         f_ = self.p.s / self.escala_base
-        j.geometry(f"{int(420 * f_)}x{int(670 * f_)}")
+        j.geometry(f"{int(420 * f_)}x{int(720 * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -7599,7 +8384,15 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
                                progress_color="#0070D1", command=lambda: tocar_som() if sw_som.get() else None)
         if self.cfg.get("som_fim", True):
             sw_som.select()
-        sw_som.pack(anchor="w", padx=28, pady=(2, 14))
+        sw_som.pack(anchor="w", padx=28, pady=(2, 10))
+        ln_idioma = ctk.CTkFrame(j, fg_color="transparent")
+        ln_idioma.pack(fill="x", padx=28, pady=(0, 14))
+        ctk.CTkLabel(ln_idioma, text="Idioma", font=fonte, text_color=BRANCO).pack(side="left")
+        op_idioma = ctk.CTkOptionMenu(ln_idioma, values=list(IDIOMAS.values()), width=150, height=32, corner_radius=10,
+                                      fg_color="#111C33", button_color="#1A2744", button_hover_color="#24365C",
+                                      font=fonte)
+        op_idioma.set(IDIOMAS.get(self.cfg.get("idioma", "pt"), "Português"))
+        op_idioma.pack(side="right")
 
         # ---- atalhos
         ctk.CTkLabel(j, text="Atalhos", font=ctk.CTkFont(family=F_SEMI, size=15), text_color=BRANCO).pack(
@@ -7637,12 +8430,18 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         def salvar():
             self.cfg.update(ip=e_ip.get().strip(), usuario=e_usr.get().strip() or "anonymous",
                             senha=e_pwd.get(), destino=op.get(), pular=bool(sw.get()), som_fim=bool(sw_som.get()))
+            novo_idioma = next((k for k, v in IDIOMAS.items() if v == op_idioma.get()), "pt")
+            mudou_idioma = novo_idioma != IDIOMA["atual"]
+            self.cfg["idioma"] = novo_idioma
             for k, v in novos.items():
                 self.cfg[f"atalho_{k}"] = v
             if getattr(self, "tl_gpu", None):
                 self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp")})
             self.salvar_cfg()
             j.destroy()
+            if mudou_idioma:                 # refaz a interface já no idioma novo
+                carregar_idioma(novo_idioma)
+                self._reconstruir(self.p.s)
             self.buscar_ps3()
 
         def procurar():

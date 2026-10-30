@@ -277,6 +277,16 @@ public final class Trofeus {
             return m;
         }
 
+        void mudarTempo(int i, long t) { p64(d, tempos[i] + 16, t); p64(d, tempos[i] + 24, t); }
+
+        /** "Último troféu" = o mais novo dos ganhos; "última atualização" = agora. */
+        void fecharTempos(long agora) {
+            long m = 0;
+            for (int i = 0; i < total; i++) if (info(i).destravado) m = Math.max(m, u64(d, tempos[i] + 16));
+            if (m > 0) { p64(d, lista + 64, m); p64(d, lista + 72, m); }
+            p64(d, lista + 32, agora); p64(d, lista + 40, agora);
+        }
+
         boolean destravar(int i, long t) {
             int o = tempos[i];
             if (u32(d, o + 4) != 0) return false;
@@ -328,6 +338,23 @@ public final class Trofeus {
             long m = 0;
             for (long[] g : ganhos()) m = Math.max(m, g[1]);
             return m;
+        }
+
+        /** -1 = não está no arquivo; 0 = só no console; 1 = já foi para a PSN. */
+        int estado(int i) {
+            for (int k = 1; k < contagem; k++) {
+                int o = ini + k * passo + 16;
+                if (u32(d, o + 32) == i) return u32(d, o + 8) != 0 ? 1 : 0;
+            }
+            return -1;
+        }
+
+        boolean mudarTempo(int i, long t) {
+            for (int k = 1; k < contagem; k++) {
+                int o = ini + k * passo + 16;
+                if (u32(d, o + 32) == i) { p64(d, o + 48, t); p64(d, o + 56, t); return true; }
+            }
+            return false;
         }
 
         /** Confere o formato (ganhos + 1 na contagem, próximo espaço vazio). Se não bater, é melhor não mexer. */
@@ -451,6 +478,64 @@ public final class Trofeus {
         public final Map<String, byte[]> novos = new LinkedHashMap<String, byte[]>();   // só o que muda
         public int feitos = 0;
         public boolean pulouPlatina = false;
+    }
+
+    public static final long DATA_MINIMA_MS = 1163203200000L;     // 11/11/2006, lançamento do PS3
+
+    /** Muda a data e a hora de troféus já ganhos que nunca foram para a PSN. novas = {id: milissegundos}. */
+    public static Resultado mudarDatas(Map<String, byte[]> arqs, Map<Integer, Long> novas, long agoraMs) throws Erro {
+        Pfd pfd = new Pfd(arqs.get("PARAM.PFD"));
+        List<String> erros = pfd.conferir(arqs);
+        if (!erros.isEmpty()) throw new Erro("a assinatura atual destes troféus não bateu com o cálculo do PSTudo ("
+                + erros.get(0) + "). Por segurança, nada foi alterado.");
+        Usr usr = new Usr(arqs.get("TROPUSR.DAT"));
+        Trns trns = new Trns(pfd.decifrar("TROPTRNS.DAT", arqs.get("TROPTRNS.DAT")));
+        if (!usr.npcomm.isEmpty() && !trns.npcomm.isEmpty() && !usr.npcomm.equals(trns.npcomm))
+            throw new Erro("TROPUSR.DAT e TROPTRNS.DAT são de jogos diferentes.");
+        trns.conferirFormato(usr.total);
+        java.util.Set<Long> ganhosT = new java.util.HashSet<Long>(), ganhosU = new java.util.HashSet<Long>();
+        for (long[] g : trns.ganhos()) ganhosT.add(g[0]);
+        for (int i = 0; i < usr.total; i++) if (usr.info(i).destravado) ganhosU.add((long) i);
+        if (!ganhosT.equals(ganhosU)) throw new Erro("TROPUSR.DAT e TROPTRNS.DAT não concordam sobre os troféus ganhos. Nada foi alterado.");
+        Resultado res = new Resultado();
+        for (int i : new TreeSet<Integer>(novas.keySet())) {
+            if (i < 0 || i >= usr.total) continue;
+            Trofeu info = usr.info(i);
+            if (!info.destravado) throw new Erro("o troféu " + i + " não está ganho. Nada foi alterado.");
+            if (info.sync || trns.estado(i) == 1) throw new Erro("um dos troféus já foi para a PSN; a data dele não pode mudar. Nada foi alterado.");
+            long ms = novas.get(i);
+            if (ms < DATA_MINIMA_MS || ms > agoraMs + 60000L) throw new Erro("a data precisa ficar entre 11/11/2006 e agora. Nada foi alterado.");
+            long t = tempoPs3(ms / 1000L * 1000L);
+            if (t == info.tempo) continue;
+            usr.mudarTempo(i, t);
+            if (!trns.mudarTempo(i, t)) throw new Erro("o troféu não está no TROPTRNS.DAT. Nada foi alterado.");
+            res.feitos++;
+        }
+        if (res.feitos == 0) return res;
+        usr.fecharTempos(Math.max(tempoPs3(agoraMs), usr.maiorTempo()));
+        fecharArquivos(arqs, pfd, usr, trns, res.novos);
+        return res;
+    }
+
+    static void fecharArquivos(Map<String, byte[]> arqs, Pfd pfd, Usr usr, Trns trns, Map<String, byte[]> novos) throws Erro {
+        byte[] cif = pfd.cifrar("TROPTRNS.DAT", trns.d);
+        byte[] original = arqs.get("TROPTRNS.DAT");
+        if (cif.length < original.length) {     // mantém o tamanho do arquivo
+            byte[] x = Arrays.copyOf(cif, original.length);
+            System.arraycopy(original, cif.length, x, cif.length, original.length - cif.length);
+            cif = x;
+        }
+        novos.put("TROPUSR.DAT", usr.d.clone());
+        novos.put("TROPTRNS.DAT", cif);
+        byte[] novoPfd = pfd.atualizar(novos);
+        Map<String, byte[]> fim = new HashMap<String, byte[]>(arqs);
+        fim.putAll(novos);
+        fim.put("PARAM.PFD", novoPfd);
+        Pfd p2 = new Pfd(novoPfd);
+        if (!p2.conferir(fim).isEmpty()) throw new Erro("a assinatura nova não conferiu. Nada foi alterado.");
+        if (new Trns(p2.decifrar("TROPTRNS.DAT", cif)).contagem != trns.contagem)
+            throw new Erro("o TROPTRNS.DAT novo não conferiu. Nada foi alterado.");
+        novos.put("PARAM.PFD", novoPfd);
     }
 
     /** Destrava 'ids'. arqs = arquivos da pasta como estão no PS3. */

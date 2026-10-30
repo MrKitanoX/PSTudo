@@ -27,9 +27,9 @@
 | **Licenças** | Envia arquivos `.rap` direto para `/dev_hdd0/exdata`, ignorando arquivos inválidos. |
 | **Updates** | Lê os jogos do PS3 (pastas `GAMES`, ISOs e o que está em `/dev_hdd0/game`) ou aceita o código digitado (ex.: `BLUS30443`), busca os updates no mesmo servidor da Sony que o PS3 usa, confere o SHA-1 de cada `.pkg` e instala no PS3 pelo webMAN, um de cada vez, do mais antigo para o mais novo. No PC também dá para só baixar os `.pkg`. |
 | **Controle remoto** | Botão 🎮 no topo: liga e desliga quando quiser o uso do controle ligado no PC (Xbox/XInput, DualShock 4, DualSense…) para controlar o PS3 pela rede, pelo controle virtual do webMAN MOD. Funciona no XMB e nos jogos. Limite do webMAN: o analógico vai inclinado até o fim (8 direções), um por vez. |
-| **Troféus** | Lista os jogos com troféus de cada usuário do PS3, com nome, tipo e o que já foi ganho, e destrava localmente os troféus marcados. Antes de gravar, faz backup no PC (ou no celular) e confere se a assinatura atual dos troféus bate com o cálculo do PSTudo; se não bater, não mexe em nada. O botão **Desfazer** volta ao backup. **Não sincronize com a PSN depois de destravar**: a Sony pode banir a conta. |
+| **Troféus** | Lista os jogos com troféus de cada usuário do PS3, com nome, tipo e o que já foi ganho, e destrava localmente os troféus marcados. O botão **Data e hora** muda a data e a hora dos troféus ganhos que ainda não foram para a PSN, só no console. Antes de gravar, faz backup no PC (ou no celular) e confere se a assinatura atual dos troféus bate com o cálculo do PSTudo; se não bater, não mexe em nada. O botão **Desfazer** volta ao backup. **Não sincronize com a PSN depois de destravar**: a Sony pode banir a conta. |
 | **Console** | Reiniciar e desligar o PS3. Ativar e desativar plugins **só até reiniciar**, sem mexer no `boot_plugins.txt`. Instalar o [XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution) e deixá-lo ligando sozinho 15 s depois do HEN (pelo `autoexec.bat` do webMAN), ajustar o analógico, ver e registrar controles no `xpad_devices.txt` (registrados à esquerda, disponíveis no PC à direita) e desinstalar o XPAD por completo se algo der errado. |
-| **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, com **FSR 1** (nitidez) e **interpolação de quadros** (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor), sem travar quando você transmite no Discord ou no OBS. |
+| **Tela** | Espelha a placa de captura com áudio, que continua ligada enquanto você usa as outras abas. A tela cheia é desenhada pela placa de vídeo, sincronizada com o monitor (sem rasgos), com **FSR 1** completo (ampliação EASU + nitidez RCAS), correção automática da faixa de cor (RGB limitado do PS3) e captura sem compressão quando a placa aguenta. A **fluidez com IA** usa a rede neural **RIFE** rodando na própria placa de vídeo para criar os quadros que faltam (x2 a x6 os quadros do jogo, ou no Hz nativo do monitor). Não trava quando você transmite no Discord ou no OBS. |
 
 <p align="center">
   <img src="docs/imagens/enviando.png" width="400" alt="Enviando jogos">
@@ -37,6 +37,10 @@
   <img src="docs/imagens/console.png" width="400" alt="Aba Console">
   <img src="docs/imagens/tela.png" width="400" alt="Espelho da placa de captura">
 </p>
+
+## Idiomas
+
+Português, inglês e espanhol: escolha no ⚙ (Configurações › Idioma). O idioma muda na hora, no PC e no Android. As traduções ficam em [`assets/idiomas`](assets/idiomas).
 
 ## Android
 
@@ -51,7 +55,7 @@ Também existe o **PSTudo para Android** (`PSTudo.apk` na página de [Releases](
 
 - **PS3 com HEN** e o **[webMAN MOD](https://github.com/aldostools/webMAN-MOD)** instalado. O PSTudo conversa com o console pelo FTP e pelos comandos web do webMAN.
 - PC com **Windows 10 ou 11**, na **mesma rede** do PS3. O cabo de rede no PS3 deixa os envios bem mais rápidos.
-- Opcional, para a aba **Tela**: uma placa de captura ligada no PC e uma placa de vídeo com OpenGL 3.3 para a tela cheia.
+- Opcional, para a aba **Tela**: uma placa de captura ligada no PC e uma placa de vídeo com OpenGL 3.3 para a tela cheia (OpenGL 4.3 deixa a fluidez com IA mais rápida). A fluidez com IA pede uma placa de vídeo dedicada; nas mais simples, use a precisão **Leve**.
 
 ## Como usar
 
@@ -69,7 +73,7 @@ A janela pode ser maximizada: a interface aumenta junto.
 | Tecla | O que faz |
 |---|---|
 | `F` | Liga e desliga o FSR (na tela cheia da aba Tela) |
-| `I` | Troca a interpolação de quadros (na tela cheia da aba Tela) |
+| `I` | Troca a fluidez com IA (na tela cheia da aba Tela) |
 | `Ctrl` + `Shift` + `F` / `I` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
 | `Esc` | Sai da tela cheia |
 
@@ -97,13 +101,20 @@ Deixe ligada a opção **Compatível com Discord e OBS** (aba Tela → Imagem). 
 **Posso transformar qualquer PKG em ISO?**
 Não. Só jogos de disco que foram empacotados em PKG. Jogos da PSN (IDs que começam com `NP`) não têm versão de disco, e atualizações não são o jogo completo. Nesses casos, instale o PKG pelo PS3.
 
-**O que a interpolação faz?**
-Cria quadros intermediários a partir do movimento da imagem, deixando tudo mais fluido. `x2` dobra os quadros do jogo (30 → 60), `x4` quadruplica (30 → 120) e assim por diante, sempre em ritmo uniforme. `Nativo` acompanha o Hz do monitor, sincronizado com ele, e é o mais suave. Ela acrescenta um pouco de atraso (cerca de 1 quadro do jogo), então para jogos competitivos é melhor deixá-la desligada. Onde o movimento não dá para acompanhar (objeto aparecendo, explosão), o PSTudo mostra o quadro real em vez de misturar dois quadros, para não criar imagem dupla. O HUD e os textos parados ficam no lugar.
+**O que a fluidez com IA faz?**
+Uma rede neural de interpolação de quadros (RIFE 4.6) roda direto na placa de vídeo, pelo OpenGL, sem instalar nada. Entre dois quadros diferentes do jogo ela calcula o movimento de cada pixel nos dois sentidos e uma máscara que resolve o que aparece e o que some, e o PSTudo monta o quadro intermediário em resolução cheia. Os quadros repetidos (jogo a 30 numa saída de 60 Hz) são ignorados e cada quadro vai para a tela numa linha do tempo com atraso constante, sincronizada com o monitor. `x2` dobra os quadros do jogo (30 → 60), `x4` quadruplica e `Nativo` acompanha o Hz do monitor: é o mais suave. A precisão **Automática** ajusta o tamanho da rede conforme a folga da placa de vídeo. Acrescenta cerca de 1 quadro do jogo de atraso, então para jogos competitivos é melhor deixá-la desligada.
+
+**A imagem está com preto acinzentado ou cores lavadas.**
+O PS3 manda RGB Limitado por padrão. Em **Imagem › Faixa de cor**, deixe **Automática** (o PSTudo detecta sozinho) ou escolha **Limitada**.
+
+**A imagem tem quadradinhos ou borrões nas bordas.**
+É a compressão MJPEG da placa. Em **Imagem › Formato da placa de captura**, use **Automático** ou **Sem compressão** (precisa de placa USB 3.0). Se o PS3 estiver em 720p, escolha o modo **720p 60** na aba Tela: a ampliação do FSR fica melhor que a da placa.
 
 ## Créditos
 
 - **[makeps3iso](https://github.com/bucanero/ps3iso-utils)**, por Estwald, com builds mantidos por bucanero (GPLv3). O código e o executável estão em [`third_party/ps3iso-utils`](third_party/ps3iso-utils).
-- **RCAS do AMD FidelityFX FSR 1** (MIT), adaptado para a nitidez da tela cheia.
+- **AMD FidelityFX FSR 1** (MIT): EASU e RCAS adaptados para a ampliação e a nitidez da tela cheia.
+- **[RIFE](https://github.com/hzwer/Practical-RIFE)** (Real-Time Intermediate Flow Estimation), por hzwer (MIT), com os pesos da versão 4.6 convertidos do **[rife-ncnn-vulkan](https://github.com/nihui/rife-ncnn-vulkan)** de nihui (MIT). A rede roda em shaders OpenGL escritos para o PSTudo (`pstudo_ia.py`).
 - **[XPAD Revolution](https://github.com/GabaRSk/XPAD-Revolution)**, por GabaRSk. É baixado do GitHub oficial na hora da instalação e não vem junto com o PSTudo.
 - **[webMAN MOD](https://github.com/aldostools/webMAN-MOD)**, por aldostools, que é o que roda no PS3.
 - Formato dos troféus: **[PS3TrophyIsGood / TROPHYParser](https://github.com/darkautism/PS3TrophyIsGood)**, por darkautism, e **[Apollo Save Tool](https://github.com/bucanero/apollo-ps3)**, por bucanero (GPLv3). Assinatura do `PARAM.PFD` baseada no **pfdtool** de flatz.

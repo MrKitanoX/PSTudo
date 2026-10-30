@@ -59,6 +59,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         prefs = getSharedPreferences("pstudo", MODE_PRIVATE);
+        L.aplicar(this, prefs.getString("idioma", "pt"));
         getWindow().setStatusBarColor(0xFF07142E);
         getWindow().setNavigationBarColor(Ui.FUNDO);
         tabEnviar = new TabEnviar(this);
@@ -183,7 +184,7 @@ public class MainActivity extends Activity {
     public int abaAtual() { return aba; }
 
     public void marcarAba(int k, String texto) {
-        abasTx.get(k).setText(texto == null ? NOMES_ABAS[k] : texto);
+        abasTx.get(k).setText(L.t(texto == null ? NOMES_ABAS[k] : texto));
     }
 
     // ------------------------------------------------------------------ threads
@@ -200,7 +201,7 @@ public class MainActivity extends Activity {
     public void ui(Runnable r) { if (vivo) h.post(r); }
 
     public void aviso(String s, boolean longo) {
-        Toast.makeText(this, s, longo ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, L.t(s), longo ? Toast.LENGTH_LONG : Toast.LENGTH_SHORT).show();
     }
 
     // ------------------------------------------------------------------ conexão
@@ -264,7 +265,7 @@ public class MainActivity extends Activity {
         d.setShape(GradientDrawable.OVAL);
         d.setColor(cor);
         pillPonto.setBackground(d);
-        pillTx.setText("ok".equals(e) ? "PS3 conectado" : "busca".equals(e) ? "Procurando o PS3…" : "PS3 não encontrado");
+        pillTx.setText(L.t("ok".equals(e) ? "PS3 conectado" : "busca".equals(e) ? "Procurando o PS3…" : "PS3 não encontrado"));
         if (mudou) {
             tabEnviar.statusMudou();
             tabArquivos.statusMudou();
@@ -356,7 +357,7 @@ public class MainActivity extends Activity {
     public EditText campo(String valor, String dica) {
         EditText e = new EditText(this);
         e.setText(valor);
-        e.setHint(dica);
+        e.setHint(L.t(dica));
         e.setSingleLine(true);
         e.setTextColor(Ui.BRANCO);
         e.setHintTextColor(Ui.CINZA_ESCURO);
@@ -386,17 +387,24 @@ public class MainActivity extends Activity {
         for (int i = 0; i < Caminhos.DESTINOS.length; i++) if (Caminhos.DESTINOS[i].equals(dest)) sp.setSelection(i);
         c.addView(sp);
         final CheckBox cbPular = new CheckBox(this);
-        cbPular.setText("Não reenviar o que já está no PS3");
+        cbPular.setText(L.t("Não reenviar o que já está no PS3"));
         cbPular.setTextColor(Ui.BRANCO);
         cbPular.setChecked(prefs.getBoolean("pular", true));
         c.addView(cbPular);
         final CheckBox cbSom = new CheckBox(this);
-        cbSom.setText("Tocar um som quando o envio terminar");
+        cbSom.setText(L.t("Tocar um som quando o envio terminar"));
         cbSom.setTextColor(Ui.BRANCO);
         cbSom.setChecked(prefs.getBoolean("som", true));
         c.addView(cbSom);
-        dialogo().setTitle("Configurações").setView(c)
-                .setPositiveButton("Salvar", new android.content.DialogInterface.OnClickListener() {
+        TextView ti = Ui.texto(this, "Idioma", 13, Ui.CINZA, Ui.NORMAL);
+        ti.setPadding(0, dp(10), 0, 0);
+        c.addView(ti);
+        final Spinner spIdioma = new Spinner(this);
+        spIdioma.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, L.NOMES));
+        for (int i = 0; i < L.CODIGOS.length; i++) if (L.CODIGOS[i].equals(L.atual())) spIdioma.setSelection(i);
+        c.addView(spIdioma);
+        dialogo().setTitle(L.t("Configurações")).setView(c)
+                .setPositiveButton(L.t("Salvar"), new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
                         prefs.edit().putString("ip", eIp.getText().toString().trim())
                                 .putString("usuario", eUsr.getText().toString().trim().isEmpty() ? "anonymous" : eUsr.getText().toString().trim())
@@ -404,15 +412,23 @@ public class MainActivity extends Activity {
                                 .putString("destino", (String) sp.getSelectedItem())
                                 .putBoolean("pular", cbPular.isChecked())
                                 .putBoolean("som", cbSom.isChecked()).apply();
+                        String novo = L.CODIGOS[Math.max(0, spIdioma.getSelectedItemPosition())];
+                        if (!novo.equals(L.atual())) {          // troca o idioma na hora
+                            prefs.edit().putString("idioma", novo).apply();
+                            L.aplicar(MainActivity.this, novo);
+                            for (int k = 0; k < NOMES_ABAS.length; k++) marcarAba(k, null);
+                            atualizarStatus(estado);
+                            mostrarAba(abaAtual());
+                        }
                         buscar();
                     }
                 })
-                .setNeutralButton("Procurar de novo", new android.content.DialogInterface.OnClickListener() {
+                .setNeutralButton(L.t("Procurar de novo"), new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int w) {
                         prefs.edit().putString("ip", "").apply();
                         buscar();
                     }
                 })
-                .setNegativeButton("Fechar", null).show();
+                .setNegativeButton(L.t("Fechar"), null).show();
     }
 }

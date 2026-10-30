@@ -96,7 +96,7 @@ public class TabArquivos {
         LinearLayout lb = Ui.linha(a);
         busca = new EditText(a);
         busca.setSingleLine(true);
-        busca.setHint("Pesquisar nesta pasta…");
+        busca.setHint(L.t("Pesquisar nesta pasta…"));
         busca.setHintTextColor(Ui.CINZA_ESCURO);
         busca.setTextColor(Ui.BRANCO);
         busca.setTextSize(14);
@@ -187,7 +187,7 @@ public class TabArquivos {
     private void status(String t, int cor) {
         statusTxt = t;
         statusCor = cor;
-        if (lblStatus != null) { lblStatus.setText(t); lblStatus.setTextColor(cor); }
+        if (lblStatus != null) { lblStatus.setText(L.t(t)); lblStatus.setTextColor(cor); }
     }
 
     // ------------------------------------------------------------------ seleção
@@ -215,11 +215,11 @@ public class TabArquivos {
         Ui.ativo(bBaixar, n > 0 && livre);
         Ui.ativo(bRenomear, u != null && !prot && livre);
         Ui.ativo(bApagar, n > 0 && !prot && livre);
-        bApagar.setText(n > 1 ? "Apagar (" + n + ")" : "Apagar");
-        bBaixar.setText(n > 1 ? "Baixar (" + n + ")" : "Baixar");
+        bApagar.setText(L.t(n > 1 ? "Apagar (" + n + ")" : "Apagar"));
+        bBaixar.setText(L.t(n > 1 ? "Baixar (" + n + ")" : "Baixar"));
         Ui.ativo(bVoltar, !caminho.equals("/"));
-        lblSel.setText(n > 1 ? n + " marcados" : "");
-        btnTudo.setText(!itens.isEmpty() && n == itens.size() ? "Desmarcar" : "Marcar tudo");
+        lblSel.setText(L.t(n > 1 ? n + " marcados" : ""));
+        btnTudo.setText(L.t(!itens.isEmpty() && n == itens.size() ? "Desmarcar" : "Marcar tudo"));
         if (adaptador != null) adaptador.notifyDataSetChanged();
     }
 
@@ -242,7 +242,7 @@ public class TabArquivos {
         fundo = false;
         buscaId++;
         textoBusca = "";
-        if (busca != null) busca.setText("");
+        if (busca != null) busca.setText(L.t(""));
         marcados.clear();
         listar();
     }
@@ -304,7 +304,7 @@ public class TabArquivos {
         fundo = false;
         buscaId++;
         textoBusca = "";
-        busca.setText("");
+        busca.setText(L.t(""));
         if (estava) listar(); else filtrar(false);
     }
 
@@ -315,7 +315,7 @@ public class TabArquivos {
         if (!a.conectado()) return;
         final int meu = ++buscaId;
         fundo = true;
-        btnFundo.setText("Procurando…");
+        btnFundo.setText(L.t("Procurando…"));
         marcados.clear();
         itens = new ArrayList<Ftp.Item>();
         botoes();
@@ -358,7 +358,7 @@ public class TabArquivos {
                 a.ui(new Runnable() {
                     public void run() {
                         if (buscaId != meu) return;
-                        if (btnFundo != null) btnFundo.setText("Subpastas");
+                        if (btnFundo != null) btnFundo.setText(L.t("Subpastas"));
                         if (fe != null) { status("Não consegui pesquisar (" + fe + ")", Ui.VERMELHO); return; }
                         itens = achados;
                         botoes();
@@ -465,7 +465,7 @@ public class TabArquivos {
         LinearLayout c = Ui.coluna(a);
         c.setPadding(dp(22), dp(8), dp(22), 0);
         c.addView(e);
-        a.dialogo().setTitle(titulo).setView(c).setNegativeButton("Cancelar", null)
+        a.dialogo().setTitle(titulo).setView(c).setNegativeButton(L.t("Cancelar"), null)
                 .setPositiveButton(botao, new DialogInterface.OnClickListener() {
                     public void onClick(DialogInterface d, int w) {
                         String n = e.getText().toString().trim();
@@ -624,8 +624,8 @@ public class TabArquivos {
         e.setEnabled(!leitura);
         box.addView(e, Ui.lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         android.app.AlertDialog.Builder b = a.dialogo().setTitle(Ftp.legivel(Caminhos.nome(c))).setView(box)
-                .setNegativeButton("Fechar", null);
-        if (!leitura) b.setPositiveButton("Salvar no PS3", new DialogInterface.OnClickListener() {
+                .setNegativeButton(L.t("Fechar"), null);
+        if (!leitura) b.setPositiveButton(L.t("Salvar no PS3"), new DialogInterface.OnClickListener() {
             public void onClick(DialogInterface d, int w) {
                 final String novo = e.getText().toString();
                 operacao("Salvando no PS3…", new Trabalho() {
@@ -691,9 +691,9 @@ public class TabArquivos {
             }
             int barra = it.nome.lastIndexOf('/');
             nome.setText(Ftp.legivel(barra >= 0 ? it.nome.substring(barra + 1) : it.nome));
-            if (barra >= 0) { onde.setVisibility(VISIBLE); onde.setText("em " + Ftp.legivel(it.nome.substring(0, barra))); }
+            if (barra >= 0) { onde.setVisibility(VISIBLE); onde.setText(L.tm("em {0}", Ftp.legivel(it.nome.substring(0, barra)))); }
             else onde.setVisibility(GONE);
-            tam.setText(it.pasta ? "" : Caminhos.tamanho(it.tamanho));
+            tam.setText(L.t(it.pasta ? "" : Caminhos.tamanho(it.tamanho)));
             boolean m = marcados.contains(it.nome);
             cb.setChecked(m);
             setBackground(m ? Ui.fundo(a, Ui.LINHA_SEL, 12, 0) : null);

@@ -64,7 +64,7 @@ public class TabConsole {
     private void msg(String t, int cor) {
         msg = t;
         msgCor = cor;
-        if (lblMsg != null) { lblMsg.setText(t); lblMsg.setTextColor(cor); }
+        if (lblMsg != null) { lblMsg.setText(L.t(t)); lblMsg.setTextColor(cor); }
     }
 
     View view() {
@@ -118,7 +118,7 @@ public class TabConsole {
         lb.addView(bZip, Ui.lpPeso(1));
         ct.addView(lb);
         swAuto = new Switch(a);
-        swAuto.setText("Ligar sozinho " + Xpad.ATRASO + " s depois do HEN");
+        swAuto.setText(L.t("Ligar sozinho " + Xpad.ATRASO + " s depois do HEN"));
         swAuto.setTextColor(Ui.BRANCO);
         swAuto.setTextSize(13);
         swAuto.setChecked(lido ? auto : a.prefs.getBoolean("xpad_auto", true));
@@ -178,7 +178,7 @@ public class TabConsole {
         SeekBar.OnSeekBarChangeListener l = new SeekBar.OnSeekBarChangeListener() {
             public void onProgressChanged(SeekBar b, int p, boolean u) {
                 int v = p + de;
-                val.setText(sat ? v + (v == 80 ? "  (parecido com DS3)" : v == 100 ? "  (sem correção)" : "") : v + "%");
+                val.setText(L.t(sat ? v + (v == 80 ? "  (parecido com DS3)" : v == 100 ? "  (sem correção)" : "") : v + "%"));
             }
             public void onStartTrackingTouch(SeekBar b) { }
             public void onStopTrackingTouch(SeekBar b) { }
@@ -408,7 +408,7 @@ public class TabConsole {
         final String ip = a.ip();
         final boolean querAuto = a.prefs.getBoolean("xpad_auto", true);
         final Map<String, Integer> ocup = ativos;
-        lblXpad.setText(zipLocal == null ? "Baixando o XPAD Revolution…" : "Lendo o ZIP…");
+        lblXpad.setText(L.t(zipLocal == null ? "Baixando o XPAD Revolution…" : "Lendo o ZIP…"));
         rodar("Instalando o XPAD…", new Acao() {
             public String fazer() throws IOException {
                 byte[] zip;
@@ -638,7 +638,7 @@ public class TabConsole {
             l.addView(t, Ui.lpPeso(1));
             TextView b = Ui.botao(a, "Remover", "perigo", new View.OnClickListener() {
                 public void onClick(View v) {
-                    status.setText("Removendo " + r.nome + "…");
+                    status.setText(L.t("Removendo " + r.nome + "…"));
                     a.bg(new Runnable() {
                         public void run() {
                             String m;
@@ -647,7 +647,7 @@ public class TabConsole {
                             catch (IOException e) { m = "Não consegui remover (" + e.getMessage() + ")"; }
                             finally { if (f != null) f.fechar(); }
                             final String fm = m;
-                            a.ui(new Runnable() { public void run() { status.setText(fm); registrados = null; preencherControles(esq, dir, status); } });
+                            a.ui(new Runnable() { public void run() { status.setText(L.t(fm)); registrados = null; preencherControles(esq, dir, status); } });
                         }
                     });
                 }
@@ -707,8 +707,8 @@ public class TabConsole {
                         String t = Xpad.TIPOS[((Spinner) m[2]).getSelectedItemPosition()][0];
                         esc.add(new Xpad.Controle((Integer) d[0], (Integer) d[1], (String) d[2], t));
                     }
-                    if (esc.isEmpty()) { status.setText("Marque pelo menos um controle."); return; }
-                    status.setText("Gravando no PS3…");
+                    if (esc.isEmpty()) { status.setText(L.t("Marque pelo menos um controle.")); return; }
+                    status.setText(L.t("Gravando no PS3…"));
                     a.bg(new Runnable() {
                         public void run() {
                             String m;
@@ -725,7 +725,7 @@ public class TabConsole {
                                 if (f != null) f.fechar();
                             }
                             final String fm = m;
-                            a.ui(new Runnable() { public void run() { status.setText(fm); registrados = null; preencherControles(esq, dir, status); } });
+                            a.ui(new Runnable() { public void run() { status.setText(L.t(fm)); registrados = null; preencherControles(esq, dir, status); } });
                         }
                     });
                 }
@@ -736,7 +736,7 @@ public class TabConsole {
 
     private void reativarXpad(final TextView status) {
         final String ip = a.ip();
-        status.setText("Reativando o XPAD…");
+        status.setText(L.t("Reativando o XPAD…"));
         a.bg(new Runnable() {
             public void run() {
                 String m;
@@ -754,7 +754,7 @@ public class TabConsole {
                     m = "Não consegui reativar (" + e.getMessage() + ")";
                 }
                 final String fm = m;
-                a.ui(new Runnable() { public void run() { status.setText(fm); lido = false; } });
+                a.ui(new Runnable() { public void run() { status.setText(L.t(fm)); lido = false; } });
             }
         });
     }
