@@ -641,17 +641,39 @@ def preparar_fundo_grande(w, h, escala):
 class Pintor:
     """Gera imagens com cantos arredondados, brilho e ícones (supersampling 4x)."""
 
+    usadas = {}           # imagens pedidas em qualquer tamanho: dá para prepará-las antes em outro tamanho
+
     def __init__(self, escala):
         self.s = escala
         self.cache = {}
+        self.pil = {}         # imagens PIL já prontas (feitas em segundo plano), ainda sem virar PhotoImage
 
     def px(self, v):
         return int(round(v * self.s))
 
     def ret(self, w, h, r, fill, outline=None, largura=0, glow=None, glow_r=18, icone=None, icone_y=0.40):
         chave = ("ret", w, h, r, fill, outline, largura, glow, glow_r, icone, icone_y)
-        if chave in self.cache:
-            return self.cache[chave]
+        foto = self.cache.get(chave)
+        if foto is not None:
+            return foto
+        Pintor.usadas[chave] = None
+        img = self.pil.pop(chave, None)
+        if img is None:
+            img = self.ret_pil(*chave[1:])
+        foto = ImageTk.PhotoImage(img)
+        self.cache[chave] = foto
+        return foto
+
+    def preparar(self, chaves):
+        """Em segundo plano: desenha as imagens que a interface vai pedir neste tamanho."""
+        for chave in chaves:
+            if chave not in self.cache and chave not in self.pil:
+                try:
+                    self.pil[chave] = self.ret_pil(*chave[1:])
+                except Exception:
+                    pass
+
+    def ret_pil(self, w, h, r, fill, outline=None, largura=0, glow=None, glow_r=18, icone=None, icone_y=0.40):
         g = self.px(glow_r) if glow else 0
         W_, H_ = self.px(w) + 2 * g, self.px(h) + 2 * g
         k = 4 if max(W_, H_) <= 320 else 2      # painéis grandes: 2x já deixa os cantos lisos
@@ -670,10 +692,8 @@ class Pintor:
                             fill=fill, outline=outline, width=lw)
         if icone:
             self._icone(d, icone, W_ * k / 2, (g + self.px(h) * icone_y) * k, self.px(1) * k)
-        img = Image.alpha_composite(img, big.resize((W_, H_), Image.LANCZOS))
-        foto = ImageTk.PhotoImage(img)
-        self.cache[chave] = foto
-        return foto
+        img = Image.alpha_composite(img, big.reduce(k))      # média de kxk pixels: cantos lisos e rápido
+        return img
 
     def _icone(self, d, tipo, cx, cy, u):
         cor = (255, 255, 255, 235)
@@ -1079,6 +1099,7 @@ class Extras:
         self.aba = k
         self._pintar_abas()
         self._mostrar_aba(k)
+        self.root.after(1500, self._preparar_tamanhos)
 
     def _mostrar_aba(self, k):
         {"enviar": self._tela_enviar, "arquivos": self.tela_arquivos, "rap": self.tela_rap,
@@ -4016,6 +4037,7 @@ class TelaCheiaGPU:
         t_troca = time.perf_counter()
         prox_relogio = time.perf_counter()
         ia_cont, ia_por_seg, t_ia = 0, [0.0], time.time()
+        relogio_tela = [None]          # hora (alisada) da última batida do monitor
 
         def guardar_quadro(item):
             nonlocal prox_vaga, prox_id
@@ -4120,18 +4142,27 @@ class TelaCheiaGPU:
                 w, h = quadros[-1]["w"], quadros[-1]["h"]
                 rede = preparar_ia(w, h)
                 agora = time.perf_counter()
-                # atraso alvo: o maior intervalo recente do jogo + uma troca de tela + margem do cálculo
-                recentes = deltas[-int(max(4, min(60, 1.2 / (sum(deltas[-10:]) / len(deltas[-10:]))))):] \
-                    if deltas else [1 / 30]
+                # instante em que esta imagem vai aparecer: próxima batida do monitor (relógio alisado)
+                if vsync and relogio_tela[0] is not None and agora - relogio_tela[0] < 4 * periodo:
+                    aparece = relogio_tela[0] + periodo
+                else:
+                    aparece = agora + (periodo if vsync else 0.0)
+                # atraso alvo: intervalo longo do jogo (quase o maior dos últimos ~3 s) + uma batida + o cálculo.
+                # Muda devagar: o movimento só fica um pouco mais lento ou rápido, nunca dá tranco.
+                recentes = sorted(deltas[-90:]) if deltas else [1 / 30]
+                longo = recentes[min(len(recentes) - 1, int(len(recentes) * 0.97))]
                 gasto_ia = (sorted(ia["medidas"])[len(ia["medidas"]) // 2] if ia["medidas"] else 0.004)
-                alvo = min(0.2, max(recentes) + (periodo if vsync else 0.0) + gasto_ia + 0.003)
-                atraso = alvo if alvo > atraso else max(alvo, atraso - 0.00025)
-                conteudo = agora + (periodo if vsync else 0.0) - atraso
+                alvo = min(0.2, longo + (periodo if vsync else 0.0) + gasto_ia + 0.004)
+                if alvo > atraso:
+                    atraso += min(alvo - atraso, 0.0015 if conteudo_ant else 1.0)
+                elif atraso - alvo > 0.006:
+                    atraso -= 0.00003
+                conteudo = aparece - atraso
                 if conteudo < conteudo_ant:
                     conteudo = conteudo_ant          # o tempo da imagem nunca volta
                 conteudo_ant = conteudo
                 if conteudo > quadros[-1]["ts"]:     # o próximo quadro atrasou: segura o último e aumenta a folga
-                    atraso += min(conteudo - quadros[-1]["ts"], 0.01)
+                    atraso += min(conteudo - quadros[-1]["ts"], 0.005)
                 self.atraso_ms = atraso * 1000
                 # par de quadros em volta do instante que vai para a tela
                 qa = qb = None
@@ -4146,8 +4177,11 @@ class TelaCheiaGPU:
                 if qb is not None and rede is not None and not qb["corte"] and qb["ts"] - qa["ts"] < 0.12 \
                         and (qa["w"], qa["h"]) == (qb["w"], qb["h"]):
                     alfa = (conteudo - qa["ts"]) / (qb["ts"] - qa["ts"])
-                    passos = modo if modo != INTERP_NATIVO else 16
-                    alfa_q = (int(alfa * passos) if modo != INTERP_NATIVO else round(alfa * passos)) / passos
+                    # Nativo: o instante exato de cada batida do monitor (passo igual sempre, sem tremer);
+                    # xN: N imagens por quadro do jogo
+                    alfa_q = alfa if modo == INTERP_NATIVO else int(alfa * modo) / modo
+                    if modo == INTERP_NATIVO and alfa < 0.02:
+                        alfa_q = 0.0
                     if alfa_q >= 1.0:
                         saida, chave = qb["tex"], ("q", qb["id"])
                     elif alfa_q > 0.0:
@@ -4182,6 +4216,15 @@ class TelaCheiaGPU:
             if modo and vsync:
                 trocas.append(agora_p - t_troca)
                 del trocas[:-90]
+                # relógio da tela: a troca acabou de acontecer numa batida do monitor; alisa o tremido da medida
+                if relogio_tela[0] is None or agora_p - relogio_tela[0] > 0.25:
+                    relogio_tela[0] = agora_p
+                else:
+                    previsto = relogio_tela[0] + periodo
+                    previsto += round((agora_p - previsto) / periodo) * periodo     # batidas perdidas
+                    relogio_tela[0] = previsto + 0.05 * (agora_p - previsto)
+            else:
+                relogio_tela[0] = None
             t_troca = agora_p
             agora = time.time()
             if agora - t0 >= 1:
@@ -4446,8 +4489,10 @@ class Captura:
                 pass
         t0, cont, falhas, dist = time.time(), 0, 0, 0
         intervalo = 1 / (cap.get(cv2.CAP_PROP_FPS) or 30) if arquivo else 0
-        periodo = 1.0 / (self.modo[2] if not arquivo else (cap.get(cv2.CAP_PROP_FPS) or 30))
-        estimado = None
+        periodo_pedido = 1.0 / (self.modo[2] if not arquivo else (cap.get(cv2.CAP_PROP_FPS) or 30))
+        periodo = None
+        hist = collections.deque(maxlen=120)
+        idx = 0
         anterior = None
         faixas = collections.deque(maxlen=600)
         while self.rodando:
@@ -4464,21 +4509,23 @@ class Captura:
                 continue
             falhas = 0
             chegou = time.perf_counter()
-            # horário alisado: a placa manda num ritmo fixo; o atraso do USB varia um pouco a cada quadro
-            if estimado is None:
+            # horário alisado: a placa manda num ritmo fixo e o USB só atrasa (nunca adianta) a entrega.
+            # Reta pelos últimos ~2 s (quadro n -> horário) encostada nas entregas mais rápidas: sem tremidas.
+            idx += 1
+            hist.append((idx, chegou))
+            if len(hist) >= 30:
+                (n0, t0_), (n1, t1_) = hist[0], hist[-1]
+                medido = (t1_ - t0_) / (n1 - n0)
+                if 1 / 125 < medido < 1 / 20:
+                    periodo = medido if periodo is None else periodo * 0.9 + medido * 0.1
+            if periodo is None:
+                periodo = periodo_pedido
+            base = min(t - periodo * n for n, t in hist)          # envelope de baixo: sem os atrasos do USB
+            estimado = base + periodo * idx
+            if chegou - estimado > 0.05:                          # a placa parou um pouco: recomeça a reta
+                hist.clear()
+                hist.append((idx, chegou))
                 estimado = chegou
-            else:
-                previsto = estimado + periodo
-                erro = chegou - previsto
-                pulados = round(erro / periodo) if erro > 0.6 * periodo else 0
-                if pulados:
-                    previsto += pulados * periodo
-                    erro = chegou - previsto
-                if abs(erro) > 0.025:
-                    estimado = chegou
-                else:
-                    estimado = previsto + 0.08 * erro
-                    periodo = min(1 / 20, max(1 / 125, periodo + 0.002 * erro))
             # repetido ou novo? (amostra pequena: 1 pixel a cada 8)
             amostra = np.ascontiguousarray(q[::8, ::8])
             if anterior is None or amostra.shape != anterior.shape:
@@ -7247,12 +7294,18 @@ class Trofeus:
         esq = ctk.CTkFrame(painel, fg_color="transparent", width=290)
         esq.grid(row=1, column=0, sticky="nsew", padx=(8, 4))
         esq.grid_propagate(False)
-        esq.grid_rowconfigure(0, weight=1)
+        esq.grid_rowconfigure(1, weight=1)
         esq.grid_columnconfigure(0, weight=1)
+        self.tr_busca = ctk.CTkEntry(esq, height=32, corner_radius=10, fg_color="#111C33", border_color="#26324D",
+                                     text_color=BRANCO, font=fonte, placeholder_text="Pesquisar jogo (nome ou ID)")
+        if st.get("busca"):
+            self.tr_busca.insert(0, st["busca"])
+        self.tr_busca.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.tr_busca.bind("<KeyRelease>", lambda e: self._tr_buscar())
         self.tr_lista_jogos = ctk.CTkScrollableFrame(esq, fg_color="#0B1426", corner_radius=12,
                                                      scrollbar_button_color="#1E2A44",
                                                      scrollbar_button_hover_color="#2A3A5E")
-        self.tr_lista_jogos.grid(row=0, column=0, sticky="nsew")
+        self.tr_lista_jogos.grid(row=1, column=0, sticky="nsew")
 
         dir_ = ctk.CTkFrame(painel, fg_color="transparent")
         dir_.grid(row=1, column=1, sticky="nsew", padx=(4, 8))
@@ -7317,6 +7370,16 @@ class Trofeus:
                                                   for d in os.scandir(b))
         self.tr_btn_restaurar.configure(state="normal" if livre and tem_backup else "disabled")
 
+    def _tr_buscar(self):
+        st = self._tr()
+        texto = self.tr_busca.get().strip()
+        if texto == st.get("busca", ""):
+            return
+        st["busca"] = texto
+        if getattr(self, "_tr_espera_busca", None):
+            self.root.after_cancel(self._tr_espera_busca)
+        self._tr_espera_busca = self.root.after(120, self._tr_desenhar_jogos)   # espera parar de digitar
+
     def _tr_desenhar_jogos(self):
         if not self._tr_ativo():
             return
@@ -7334,7 +7397,14 @@ class Trofeus:
             ctk.CTkLabel(self.tr_lista_jogos, text="Nenhum jogo com troféus neste usuário.", font=f_sub,
                          text_color=CINZA, wraplength=240).pack(pady=20)
             return
-        for j in st["jogos"]:
+        busca = sem_acento(st.get("busca", "")).lower().split()
+        jogos = [j for j in st["jogos"]
+                 if all(p_ in sem_acento(f"{j['jogo']} {j['codigo']}").lower() for p_ in busca)]
+        if not jogos:
+            ctk.CTkLabel(self.tr_lista_jogos, text=traduzir_modelo("Nada com “{0}”.", st.get("busca", "")),
+                         font=f_sub, text_color=CINZA, wraplength=240).pack(pady=20)
+            return
+        for j in jogos:
             sel = j["codigo"] == st["sel"]
             linha = ctk.CTkFrame(self.tr_lista_jogos, fg_color="#1A3358" if sel else "#0F1B33", corner_radius=10,
                                  cursor="hand2")
@@ -7833,6 +7903,10 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         esc_tela = min(self.root.winfo_screenwidth() / W, self.root.winfo_screenheight() / H)
         self.root.after(1200, lambda: threading.Thread(target=preparar_fundo_grande, args=(W, H, esc_tela),
                                                        daemon=True).start())
+        # tamanhos prováveis (maximizada, com e sem barra de tarefas): imagens prontas antes de precisar
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        self._escalas_previstas = sorted({round(min(sw / W, (sh - d) / H), 3) for d in (0, 40, 72, 80)})
+        self.root.after(2500, self._preparar_tamanhos)
 
         self.tela_inicio()
         self.root.after(50, self.ler_fila)
@@ -8494,7 +8568,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         mudou_estado = estado != getattr(self, "_estado_janela", estado)
         self._estado_janela = estado
         # maximizar/restaurar: refaz já; arrastando a borda: espera parar de mexer
-        self._espera_tam = self.root.after(1 if mudou_estado else 160, self._ajustar_escala)
+        self._espera_tam = self.root.after(1 if mudou_estado else 90, self._ajustar_escala)
 
     def _ajustar_escala(self):
         self._espera_tam = None
@@ -8509,9 +8583,55 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
             return
         self._reconstruir(escala)
 
+    def _preparar_tamanhos(self):
+        """Desenha em segundo plano as imagens dos tamanhos prováveis da janela: maximizar e voltar ficam rápidos."""
+        if getattr(self, "_preparando", False):
+            return
+        self._preparando = True
+        pintores = self.__dict__.setdefault("_pintores", {})
+        alvos = []
+        for esc in list(getattr(self, "_escalas_previstas", [])) + [self.escala_base]:
+            if not any(abs(k - esc) < 0.02 for k in pintores):
+                pintores[round(esc, 3)] = Pintor(esc)
+            alvos.append(min(pintores.items(), key=lambda kv: abs(kv[0] - esc))[1])
+        chaves = list(Pintor.usadas)
+
+        def trabalho():
+            try:
+                for pt in alvos:
+                    if pt is not self.p:
+                        pt.preparar(chaves)
+            finally:
+                self._preparando = False
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _sem_redesenho(self, congelar):
+        """No Windows, segura a pintura da janela enquanto a interface é refeita: nada pisca pela metade."""
+        if not WIN:
+            return
+        try:
+            import ctypes
+            hwnd = int(self.root.wm_frame(), 16)
+            ctypes.windll.user32.SendMessageW(hwnd, 0x000B, 0 if congelar else 1, 0)     # WM_SETREDRAW
+            if not congelar:
+                ctypes.windll.user32.RedrawWindow(hwnd, None, None, 0x0001 | 0x0004 | 0x0080 | 0x0100 | 0x0400)
+        except Exception:
+            pass
+
     def _reconstruir(self, escala):
+        self._sem_redesenho(True)
+        try:
+            self._reconstruir_ja(escala)
+        finally:
+            self.root.update_idletasks()
+            self._sem_redesenho(False)
+
+    def _reconstruir_ja(self, escala):
         self.limpar()
         pintores = self.__dict__.setdefault("_pintores", {})
+        perto = [k for k in pintores if abs(k - escala) < 0.015]     # tamanho quase igual: aproveita as imagens
+        if perto:
+            escala = min(perto, key=lambda k: abs(k - escala))
         self.p = pintores.setdefault(round(escala, 3), Pintor(escala))   # imagens já feitas ficam guardadas
         try:
             ctk.set_widget_scaling(escala / self.escala_base)
@@ -8522,6 +8642,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self.c.pack_configure(expand=True)
         self._montar_base()
         self._mostrar_aba(self.aba)
+        self.root.after(1500, self._preparar_tamanhos)
         if self.enviando and getattr(self, "ultimo_prog", None):
             self._atualizar_aba_envio(min(1.0, self.ultimo_prog[0] / self.ultimo_prog[1]))
 

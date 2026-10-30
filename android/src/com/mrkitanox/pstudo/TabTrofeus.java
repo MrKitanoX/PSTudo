@@ -121,11 +121,45 @@ public class TabTrofeus {
             }
             c.addView(us, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 6, 0, 0));
         }
+        final android.widget.EditText busca = a.campo(this.busca, "Pesquisar jogo (nome ou ID)");
+        busca.setTextSize(14);
+        c.addView(busca, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 8, 0, 0));
         ScrollView sv = new ScrollView(a);
-        LinearLayout lista = Ui.coluna(a);
-        if (jogos == null) aviso(lista, lendo ? "Lendo os troféus do PS3…" : a.conectado() ? "" : "Conecte o PS3 para ver os troféus.", Ui.CINZA);
-        else if (jogos.isEmpty()) aviso(lista, "Nenhum jogo com troféus neste usuário.", Ui.CINZA);
-        else for (final Jogo j : jogos) {
+        final LinearLayout lista = Ui.coluna(a);
+        preencherJogos(lista);
+        busca.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence x, int i, int j, int k) { }
+            public void onTextChanged(CharSequence x, int i, int j, int k) { }
+            public void afterTextChanged(android.text.Editable e) {
+                TabTrofeus.this.busca = e.toString();
+                preencherJogos(lista);          // só a lista muda: o teclado continua aberto
+            }
+        });
+        sv.addView(lista);
+        c.addView(sv, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, 0, 0, 10, 0, 0));
+        ((LinearLayout.LayoutParams) sv.getLayoutParams()).weight = 1;
+        rodape(c);
+        return c;
+    }
+
+    private String busca = "";
+
+    static String semAcento(String s) {
+        return java.text.Normalizer.normalize(s, java.text.Normalizer.Form.NFD).replaceAll("\\p{M}", "").toLowerCase(Locale.ROOT);
+    }
+
+    private void preencherJogos(LinearLayout lista) {
+        lista.removeAllViews();
+        if (jogos == null) { aviso(lista, lendo ? "Lendo os troféus do PS3…" : a.conectado() ? "" : "Conecte o PS3 para ver os troféus.", Ui.CINZA); return; }
+        if (jogos.isEmpty()) { aviso(lista, "Nenhum jogo com troféus neste usuário.", Ui.CINZA); return; }
+        String[] palavras = semAcento(busca.trim()).split("\\s+");
+        int achados = 0;
+        for (final Jogo j : jogos) {
+            String alvo = semAcento(j.nome + " " + j.codigo);
+            boolean ok = true;
+            for (String p : palavras) if (!p.isEmpty() && !alvo.contains(p)) ok = false;
+            if (!ok) continue;
+            achados++;
             LinearLayout l = Ui.coluna(a);
             l.setBackground(Ui.estados(a, Ui.CARD, Ui.LINHA_SEL, 12, 0));
             l.setPadding(dp(14), dp(10), dp(14), dp(10));
@@ -140,11 +174,7 @@ public class TabTrofeus {
             l.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { escolher(j.codigo, false); } });
             lista.addView(l, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, 0, 0, 0, 6));
         }
-        sv.addView(lista);
-        c.addView(sv, Ui.margem(a, ViewGroup.LayoutParams.MATCH_PARENT, 0, 0, 10, 0, 0));
-        ((LinearLayout.LayoutParams) sv.getLayoutParams()).weight = 1;
-        rodape(c);
-        return c;
+        if (achados == 0) aviso(lista, L.tm("Nada com “{0}”.", busca.trim()), Ui.CINZA);
     }
 
     private Jogo jogo(String cod) {
