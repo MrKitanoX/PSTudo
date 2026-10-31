@@ -78,7 +78,7 @@ void main() {
     ivec2 D = p >> 1;
     ivec4 oc = (ivec4(0, 1, 2, 3) + og * 4) * 4 + fase.y * 2 + fase.x;
     bvec4 vale = lessThan(ivec4(0, 1, 2, 3) + og * 4, ivec4(6));
-    oc = ivec4(mix(ivec4(0), oc, vale));
+    oc *= ivec4(vale);          // GLSL 3.30 não tem mix() com inteiros
     vec4 acc = vec4(P(base + oc.x).x, P(base + oc.y).x, P(base + oc.z).x, P(base + oc.w).x);
     int wb = base + 24;
     ivec2 ihi = (D + 1) >> 1;
@@ -223,6 +223,8 @@ uniform sampler2D S;      // estado final da rede
 uniform vec2 rede;        // LN, AN (tamanho da textura da rede, com sobra)
 uniform vec2 conteudo;    // parte útil da rede
 uniform vec2 tam_fonte;   // tamanho do quadro original
+uniform vec2 escala;      // (1, 1) normal; (2t, 2(1-t)) quando o movimento foi calculado em t = 0,5
+uniform float vies;       // 0 normal; ln((1-t)/t) no modo escalado: puxa a mistura para o quadro mais perto
 out vec4 cor;
 vec4 g(int k, ivec2 q) {
     q = clamp(q, ivec2(0), ivec2(conteudo) - 1);
@@ -238,8 +240,8 @@ void main() {
     vec2 uv = gl_FragCoord.xy / tam_fonte;
     vec2 s = uv * conteudo;
     vec4 fl = bil(2, s);
-    float m = 1.0 / (1.0 + exp(-bil(1, s).w));
-    vec2 u0 = uv + fl.xy / conteudo, u1 = uv + fl.zw / conteudo;
+    float m = 1.0 / (1.0 + exp(-(bil(1, s).w + vies)));
+    vec2 u0 = uv + fl.xy * escala.x / conteudo, u1 = uv + fl.zw * escala.y / conteudo;
     vec3 c0 = texture(A, u0).rgb, c1 = texture(B, u1).rgb;
     cor = vec4(c0 * m + c1 * (1.0 - m), 1.0);
 }
@@ -310,8 +312,11 @@ def arrumar_deconv(w, b):
 class RifeGL:
     """Executa o RIFE 4.6 em um contexto ModernGL já criado (tela cheia do PSTudo ou teste sem janela)."""
 
-    def __init__(self, ctx, pesos=None, vagas=4):
+    def __init__(self, ctx, pesos=None, vagas=4, meia=True):
+        """meia: mapas internos das convoluções em 16 bits (metade da leitura de memória, que é o gargalo;
+        diferença no movimento < 0,05 pixel)."""
         import moderngl
+        self.meia = bool(meia)
         self.n_vagas = vagas
         self.mgl = moderngl
         self.ctx = ctx
@@ -336,25 +341,30 @@ class RifeGL:
         self.cab = CAB_SSBO if self.ssbo else CAB_TEX
         self.ver = "430" if self.ssbo else "330"
         self.vao_vazio = {}
-        self.progs = {}
+        self.progs = {}          # nome -> shader do tamanho atual
+        self.cache = {}          # (nome, #defines) -> (shader, vao)
         self.tam = None
         self.ultimo_t = None
 
     # ---- utilidades
     def _prog(self, chave, fonte, defs, comum=False):
-        p = self.progs.get(chave)
-        if p is None:
+        # guardado pelo nome E pelos #defines (que levam o tamanho): quando a precisão da IA muda de
+        # nível, cada camada usa o shader do tamanho novo (antes reaproveitava o do tamanho anterior)
+        completa = (chave, tuple(defs.items()))
+        par = self.cache.get(completa)
+        if par is None:
             d = "".join(f"#define {k} {v}\n" for k, v in defs.items())
             fs = self.cab + d + (COMUM if comum else "") + fonte
             p = self.ctx.program(vertex_shader=VS.replace("{ver}", self.ver), fragment_shader=fs)
-            self.progs[chave] = p
-            self.vao_vazio[chave] = self.ctx.vertex_array(p, [])
             if not self.ssbo and "pesos" in p:
                 p["pesos"] = 7
-        return p
+            par = (p, self.ctx.vertex_array(p, []))
+            self.cache[completa] = par
+        self.progs[chave], self.vao_vazio[chave] = par
+        return par[0]
 
-    def _tex(self, larg, alt, grupos=1):
-        t = self.ctx.texture((larg * grupos, alt), 4, dtype="f4")
+    def _tex(self, larg, alt, grupos=1, meia=False):
+        t = self.ctx.texture((larg * grupos, alt), 4, dtype="f2" if meia else "f4")
         t.filter = (self.mgl.NEAREST, self.mgl.NEAREST)
         t.repeat_x = t.repeat_y = False
         return t, self.ctx.framebuffer(color_attachments=[t])
@@ -395,9 +405,9 @@ class RifeGL:
             elif b == 0:
                 blk["X"] = self._tex(L1, A1, 2)
                 self._prog(("ent0",), FS_ENTRADA0, dict(base, WOUT=L1, ESC=float(esc)), True)
-            blk["F1"] = self._tex(L2, A2, _g(c // 2))
-            blk["FA"] = self._tex(L3, A3, _g(c))
-            blk["FB"] = self._tex(L3, A3, _g(c))
+            blk["F1"] = self._tex(L2, A2, _g(c // 2), self.meia)
+            blk["FA"] = self._tex(L3, A3, _g(c), self.meia)
+            blk["FB"] = self._tex(L3, A3, _g(c), self.meia)
             blk["T"] = self._tex(L1, A1, 2)
             blk["c0a"] = ic
             self._prog(("conv", b, "a"), FS_CONV, dict(WIN=L1, HIN=A1, GIN=gin0, WOUT=L2, GOUT=_g(c // 2),
@@ -428,8 +438,10 @@ class RifeGL:
 
     def liberar(self):
         self.liberar_texturas()
-        for p in self.progs.values():
+        for p, vao in self.cache.values():
+            vao.release()
             p.release()
+        self.cache.clear()
         self.progs.clear()
         if self.ssbo:
             self.buf.release()
@@ -452,7 +464,10 @@ class RifeGL:
         I0, I1 = self.imgs[va][0], self.imgs[vb][0]
         s_atual = None
         n_s = 0
+        medir = getattr(self, "medir_blocos", None)     # só no teste de velocidade
         for b, blk in enumerate(self.blocos):
+            if medir is not None:
+                medir[b].__enter__()
             ic = blk["c0a"]
             if b == 0:
                 self._rodar(("ent0",), blk["X"][1], [(0, I0), (1, I1)], I0=0, I1=1, t=float(t))
@@ -478,5 +493,54 @@ class RifeGL:
             self._rodar(("atu", b), destino[1], texs, **unis)
             s_atual = destino[0]
             n_s += 1
+            if medir is not None:
+                medir[b].__exit__(None, None, None)
         self.estado = s_atual
         return s_atual
+
+
+def teste_velocidade(registrar, larguras=(640, 960, 1280), repeticoes=20, rodadas=3):
+    """Mede o tempo da rede na placa de vídeo (consulta de tempo da GPU), 32 e 16 bits, alternando
+    as rodadas para o resto do PC atrapalhar igual os dois. Usado pelo PSTudo.exe --teste-ia."""
+    import moderngl
+    try:
+        ctx = moderngl.create_standalone_context(require=430)     # o mesmo que a tela cheia usa
+    except Exception:
+        ctx = moderngl.create_standalone_context(require=330)
+    registrar(f"Teste da IA: {ctx.info.get('GL_RENDERER')} / OpenGL {ctx.version_code}")
+    pesos = ler_pesos()
+    q = ctx.query(time=True)
+    qb = [ctx.query(time=True) for _ in range(4)]
+    redes = {"32 bits": RifeGL(ctx, pesos, vagas=2, meia=False), "16 bits": RifeGL(ctx, pesos, vagas=2, meia=True)}
+    res = {(n, w): [] for n in redes for w in larguras}
+    blocos = {}
+    for _ in range(rodadas):
+        for w in larguras:
+            h = int(round(w * 9 / 16 / 2)) * 2
+            src = ctx.texture((w, h), 3, np.random.randint(0, 255, (h, w, 3), np.uint8).tobytes())
+            for nome, r in redes.items():
+                r.preparar(w, h)
+                for v in range(2):
+                    r.carregar_quadro(v, src)
+                for _ in range(3):
+                    r.inferir(0, 1, 0.5)
+                for _ in range(repeticoes):
+                    with q:
+                        r.inferir(0, 1, 0.5)
+                    res[(nome, w)].append(q.elapsed / 1e6)
+                r.medir_blocos = qb
+                r.inferir(0, 1, 0.5)
+                r.medir_blocos = None
+                blocos[(nome, w)] = "/".join(f"{x.elapsed / 1e6:.1f}" for x in qb)
+            src.release()
+
+    def mediana(v):
+        v = sorted(v)
+        return v[len(v) // 2]
+    for nome in redes:
+        partes = [f"{w}: {mediana(res[(nome, w)]):.2f} ms (blocos {blocos[(nome, w)]})" for w in larguras]
+        registrar(f"Teste da IA [{nome}] " + "; ".join(partes))
+    for r in redes.values():
+        r.liberar()
+    ctx.release()
+    return {w: (mediana(res[("16 bits", w)]), mediana(res[("32 bits", w)])) for w in larguras}

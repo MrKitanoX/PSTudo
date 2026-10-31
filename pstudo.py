@@ -4089,27 +4089,41 @@ class TelaCheiaGPU:
                     for q in quadros:          # os quadros guardados precisam ir de novo para a rede
                         rede.carregar_quadro(q["vaga"], q["tex"])
                     ia["chave"] = None
+                    ia["inferido"] = None
                 return rede
             except Exception as e:
                 self.ia_falhou = str(e)[:120] or type(e).__name__
                 self.avisar("Fluidez com IA indisponível nesta placa de vídeo")
                 return None
 
-        def interpolar(qa, qb, alfa):
+        def interpolar(qa, qb, alfa, escalar=False):
+            """Monta a imagem do instante alfa. escalar: a rede roda uma vez só por par de quadros (t = 0,5) e
+            as outras imagens saem escalando esse movimento — cabe no Hz do monitor quando a inferência exata
+            de cada batida não cabe. Devolve (textura, rodou_a_rede)."""
             rede = ia["rede"]
-            medir = ia["n"] % 12 == 0
-            if medir:
-                with ia["query"]:
-                    rede.inferir(qa["vaga"], qb["vaga"], alfa)
+            t_rede = 0.5 if escalar else alfa
+            par = (qa["id"], qb["id"], t_rede)
+            rodou = ia.get("inferido") != par
+            medir = rodou and ia["n"] % 12 == 0
+            if rodou:
+                if medir:
+                    with ia["query"]:
+                        rede.inferir(qa["vaga"], qb["vaga"], t_rede)
+                else:
+                    rede.inferir(qa["vaga"], qb["vaga"], t_rede)
+                ia["inferido"] = par
+                ia["n"] += 1
+            if escalar:
+                tt = min(0.98, max(0.02, alfa))
+                escala, vies = (2.0 * alfa, 2.0 * (1.0 - alfa)), math.log((1.0 - tt) / tt)
             else:
-                rede.inferir(qa["vaga"], qb["vaga"], alfa)
-            ia["n"] += 1
+                escala, vies = (1.0, 1.0), 0.0
             w, h = qa["w"], qa["h"]
             saida = textura("interp", (w, h), comp=4, dtype="f2")
             fbo_de("interp").use()
             passo("monta", (0, 0, w, h), [(0, qa["tex"]), (1, qb["tex"]), (2, rede.estado)], A=0, B=1, S=2,
                   rede=tuple(float(v) for v in rede.tam), conteudo=tuple(float(v) for v in rede.conteudo),
-                  tam_fonte=(float(w), float(h)))
+                  tam_fonte=(float(w), float(h)), escala=escala, vies=vies)
             if medir:
                 try:
                     gasto = ia["query"].elapsed / 1e9
@@ -4117,7 +4131,7 @@ class TelaCheiaGPU:
                     del ia["medidas"][:-5]
                 except Exception:
                     pass
-            return saida
+            return saida, rodou
 
         def ajustar_nivel(w, falta=False):
             """Automática: diminui a rede se a placa de vídeo estiver apertada (ou se não couberem as imagens
@@ -4319,7 +4333,10 @@ class TelaCheiaGPU:
                     # Nativo: o instante exato de cada batida do monitor (passo igual sempre, sem tremer);
                     # xN (ou Nativo sem folga na placa de vídeo): N imagens por quadro do jogo, cada uma
                     # repetida nas batidas seguintes até a próxima
-                    exato = modo == INTERP_NATIVO and passos >= quer
+                    # Nativo sem folga para uma inferência por batida (mas com folga para uma por quadro):
+                    # movimento calculado uma vez e escalado para cada batida
+                    escalar = modo == INTERP_NATIVO and 2 <= passos < quer
+                    exato = modo == INTERP_NATIVO and (passos >= quer or escalar)
                     alfa_q = alfa if exato else int(alfa * passos) / passos
                     if exato and alfa < 0.02:
                         alfa_q = 0.0
@@ -4331,9 +4348,9 @@ class TelaCheiaGPU:
                             saida = cache["interp"]
                         else:
                             try:
-                                saida = interpolar(qa, qb, alfa_q)
+                                saida, rodou = interpolar(qa, qb, alfa_q, escalar)
                                 ia["chave"] = chave
-                                ia_cont += 1
+                                ia_cont += int(rodou)
                             except Exception as e:
                                 self.ia_falhou = str(e)[:120] or type(e).__name__
                                 self.avisar("Fluidez com IA indisponível nesta placa de vídeo")
@@ -9550,4 +9567,15 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
 
 
 if __name__ == "__main__":
+    if "--teste-ia" in sys.argv:          # mede a fluidez com IA na placa de vídeo e escreve no registro
+        _iniciar_registro()
+        try:
+            from pstudo_ia import teste_velocidade
+            melhor = teste_velocidade(registrar)
+            registrar("Teste da IA: 16 bits x 32 bits " + ", ".join(f"{w}: {v[0]:.2f} x {v[1]:.2f} ms"
+                                                                     for w, v in sorted(melhor.items())))
+        except Exception as e:
+            import traceback
+            registrar("Teste da IA falhou: " + traceback.format_exc())
+        sys.exit(0)
     App().rodar()
