@@ -3679,6 +3679,7 @@ class TelaCheiaGPU:
                  atalhos=None, compativel=True, opcoes=None, ao_gravar=None):
         self.cap, self.fsr, self.ao_fechar, self.ao_mudar_fsr = captura, fsr, ao_fechar, ao_mudar_fsr
         self.ao_gravar = ao_gravar
+        self.comparar = bool((opcoes or {}).get("comparar", False))
         self.interp_modo, self.ao_mudar_interp = interp_modo, ao_mudar_interp
         self.atalhos = atalhos or {"fsr": "f", "interp": "i"}
         self.opcoes = dict(nitidez=0.5, faixa="Automática", vsync=True, ia="Automática")
@@ -3722,6 +3723,12 @@ class TelaCheiaGPU:
 
     def definir_opcoes(self, **op):
         self.opcoes.update(op)
+        if "comparar" in op and bool(op["comparar"]) != self.comparar:
+            self.alternar_comparar()
+
+    def alternar_comparar(self):
+        self.comparar = not self.comparar
+        self.avisar("Comparador: " + ("ligado (esquerda sem filtros)" if self.comparar else "desligado"))
 
     def pedir_gravacao(self):
         if self.ao_gravar:
@@ -3747,9 +3754,9 @@ class TelaCheiaGPU:
         self._thread_atalhos = kernel32.GetCurrentThreadId()
         msg = wintypes.MSG()
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # cria a fila de mensagens desta thread
-        acoes = {1: self.alternar_fsr, 2: self.proxima_interp, 3: self.pedir_gravacao}
+        acoes = {1: self.alternar_fsr, 2: self.proxima_interp, 3: self.pedir_gravacao, 4: self.alternar_comparar}
         usados = []
-        for id_, nome in ((1, "fsr"), (2, "interp"), (3, "gravar")):
+        for id_, nome in ((1, "fsr"), (2, "interp"), (3, "gravar"), (4, "comparar")):
             vk = tecla_para_vk(self.atalhos.get(nome, ""))
             if vk and user32.RegisterHotKey(None, id_, 0x0002 | 0x0004 | 0x4000, vk):  # Ctrl+Shift, sem repetir
                 usados.append(id_)
@@ -3929,8 +3936,33 @@ class TelaCheiaGPU:
             self.faixa_atual = f
             return 1 if f == "Limitada" else 0
 
-        def mostrar(src, w, h):
-            """Desenha a textura src (w×h, linha 0 no topo) na tela: escala/FSR, faixa de cor, nitidez, aviso."""
+        rotulos = {}
+
+        def rotulo(texto):
+            """Etiqueta pequena (textura com transparência) para o comparador."""
+            r_ = rotulos.get(texto)
+            if r_ is None:
+                txt = fonte.render(texto, True, (255, 255, 255))
+                px_, py_ = int(16 * escala_aviso), int(8 * escala_aviso)
+                sup = pygame.Surface((txt.get_width() + 2 * px_, txt.get_height() + 2 * py_), pygame.SRCALPHA)
+                pygame.draw.rect(sup, (10, 18, 34, 200), sup.get_rect(), border_radius=sup.get_height() // 2)
+                sup.blit(txt, (px_, py_))
+                t_ = ctx.texture(sup.get_size(), 4, pygame.image.tobytes(sup, "RGBA"))
+                t_.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                r_ = rotulos[texto] = (t_, sup.get_size())
+            return r_
+
+        def desenhar_rotulo(texto, x, y):
+            t_, (rw, rh) = rotulo(texto)
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+            passo("aviso", (int(x), int(y), rw, rh), [(0, t_)], tex=0, tam=(float(rw), float(rh)),
+                  origem=(float(int(x)), float(int(y))), opacidade=1.0)
+            ctx.disable(moderngl.BLEND)
+
+        def mostrar(src, w, h, cru=None):
+            """Desenha a textura src (w×h, linha 0 no topo) na tela: escala/FSR, faixa de cor, nitidez, aviso.
+            Comparador ligado: a metade esquerda mostra 'cru' (o quadro real da placa, sem nenhum filtro)."""
             esc = min(larg / w, alt / h)
             vw, vh = max(2, int(round(w * esc))), max(2, int(round(h * esc)))
             x0, y0 = (larg - vw) // 2, oy + (alt - vh) // 2
@@ -3946,6 +3978,19 @@ class TelaCheiaGPU:
             nit = float(self.opcoes.get("nitidez", 0.5)) if self.fsr else 0.0
             passo("rcas", (x0, y0, vw, vh), [(0, meio)], src=0, tam=(float(vw), float(vh)),
                   origem=(float(x0), float(y0)), virar=1.0, nitidez=nit)
+            if self.comparar:
+                cru = cru if cru is not None else src
+                xm = x0 + vw // 2
+                ctx.scissor = (x0, y0, xm - x0, vh)          # só a metade esquerda: ampliação simples, sem nada
+                passo("escala", (x0, y0, vw, vh), [(0, cru)], src=0, tam_in=(float(w), float(h)),
+                      tam_out=(float(vw), float(vh)), origem=(float(x0), float(y0)), virar=1.0, modo=0, faixa=0)
+                ctx.scissor = None
+                ctx.clear(1.0, 1.0, 1.0, viewport=(xm - 1, y0, 2, vh))      # linha divisória
+                m_ = int(20 * escala_aviso)
+                topo = y0 + vh - m_ - rotulo("x")[1][1]
+                desenhar_rotulo(traduzir("Sem filtros"), x0 + m_, topo)
+                tw = rotulo(traduzir("Com filtros"))[1][0]
+                desenhar_rotulo(traduzir("Com filtros"), x0 + vw - m_ - tw, topo)
             desenhar_aviso()
             pygame.display.flip()
             if vsync:
@@ -4093,6 +4138,8 @@ class TelaCheiaGPU:
                         self.proxima_interp()
                     elif nome == self.atalhos.get("gravar"):
                         self.pedir_gravacao()
+                    elif nome == self.atalhos.get("comparar"):
+                        self.alternar_comparar()
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     agora = time.time()
                     if agora - ult_clique < 0.35:
@@ -4134,7 +4181,7 @@ class TelaCheiaGPU:
                     textura("q", (w, h), bgr=True).write(np.ascontiguousarray(quadro))
                     mostradas += 1
                 h, w = quadro.shape[:2]
-                mostrar(cache["q"], w, h)
+                mostrar(cache["q"], w, h, cache["q"])
             # ---------------- com fluidez
             else:
                 while self.cap.distintos:
@@ -4214,7 +4261,7 @@ class TelaCheiaGPU:
                 if rede is not None:
                     ajustar_nivel(w)
                     self.ia_info = f"IA {rede.conteudo[0]}×{rede.conteudo[1]}"
-                mostrar(saida, qa["w"], qa["h"])
+                mostrar(saida, qa["w"], qa["h"], qa["tex"])
                 if not vsync:                         # sem sincronização: relógio próprio no Hz do monitor
                     prox_relogio += periodo
                     if prox_relogio < time.perf_counter() - 0.05:
@@ -5268,7 +5315,8 @@ class Tela:
 
     # ---- opções de imagem
     def _tl_opcoes(self):
-        return dict(nitidez=float(self.cfg.get("tela_nitidez", 0.5)), faixa=self.cfg.get("tela_faixa", "Automática"),
+        return dict(comparar=bool(getattr(self, "tl_comparar", None) and self.tl_comparar.get()),
+                    nitidez=float(self.cfg.get("tela_nitidez", 0.5)), faixa=self.cfg.get("tela_faixa", "Automática"),
                     vsync=bool(self.cfg.get("tela_vsync", True)), ia=self.cfg.get("tela_ia", "Automática"))
 
     def _tl_aplicar_opcoes(self):
@@ -5276,7 +5324,7 @@ class Tela:
             self.tl_gpu.definir_opcoes(**self._tl_opcoes())
 
     def tl_opcoes_imagem(self):
-        j = self._janela("Imagem", 500, 660)
+        j = self._janela("Imagem", 500, 680)
         f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
         f_txt = ctk.CTkFont(family=F_REG, size=12)
         f_rot = ctk.CTkFont(family=F_SEMI, size=13)
@@ -5309,6 +5357,16 @@ class Tela:
             ctk.CTkSwitch(corpo, text=texto, variable=var, font=f_rot, progress_color="#0070D1",
                           button_color="#E5ECF8", fg_color="#2A3A5E", command=ao_mudar).pack(anchor="w", padx=14,
                                                                                            pady=(18, 0))
+
+        # ---- comparador
+        if not hasattr(self, "tl_comparar"):
+            self.tl_comparar = tk.BooleanVar(value=False)
+        g_ = getattr(self, "tl_gpu", None)
+        if g_ is not None:
+            self.tl_comparar.set(g_.comparar)
+        chave("Comparador: metade da tela sem filtros", self.tl_comparar, self._tl_aplicar_opcoes)
+        explica("Divide a tela cheia: à esquerda o quadro como sai da placa, sem FSR, sem correção de cor e sem "
+                f"fluidez; à direita com tudo ligado. Atalho na tela cheia: {self.nome_tecla('comparar')}.", 60)
 
         # ---- nitidez e ampliação
         chave("FSR 1 — ampliação e nitidez da AMD", self.tl_fsr, self._tl_mudou_fsr)
@@ -5410,7 +5468,8 @@ class Tela:
                 self.fila.put(("cb", lambda: (setattr(self, "tl_interp", nome), self.cfg.update(tela_interp=nome))))
             self.tl_gpu = TelaCheiaGPU(self.tl_cap, bool(self.tl_fsr.get()), fechou, mudou_fsr,
                                        INTERP_OPCOES.get(self.tl_interp, 0), mudou_interp,
-                                       {"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar")},
+                                       {"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar"),
+                                        "comparar": self.atalho("comparar")},
                                        compativel=self.cfg.get("tela_compativel", True), opcoes=self._tl_opcoes(),
                                        ao_gravar=lambda: self.fila.put(("cb", self.tl_gravar)))
             return
@@ -5931,9 +5990,9 @@ class Conversor:
 
 
 # =============================================================== atalhos
-ATALHOS_PADRAO = {"fsr": "f", "interp": "i", "gravar": "r"}
+ATALHOS_PADRAO = {"fsr": "f", "interp": "i", "gravar": "r", "comparar": "c"}
 ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)",
-                 "gravar": "Gravar / parar (aba Tela)"}
+                 "gravar": "Gravar / parar (aba Tela)", "comparar": "Comparar com e sem filtros (tela cheia)"}
 _TK_PARA_PYGAME = {"return": "return", "space": "space", "tab": "tab", "backspace": "backspace",
                    "insert": "insert", "delete": "delete", "home": "home", "end": "end", "prior": "page up",
                    "next": "page down", "up": "up", "down": "down", "left": "left", "right": "right",
@@ -8844,7 +8903,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self._janela_cfg = j
         j.title("Configurações")
         f_ = self.p.s / self.escala_base
-        j.geometry(f"{int(420 * f_)}x{int(752 * f_)}")
+        j.geometry(f"{int(420 * f_)}x{int(786 * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -8945,7 +9004,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
             for k, v in novos.items():
                 self.cfg[f"atalho_{k}"] = v
             if getattr(self, "tl_gpu", None):
-                self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar")})
+                self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp"), "gravar": self.atalho("gravar"),
+                                        "comparar": self.atalho("comparar")})
             self.salvar_cfg()
             j.destroy()
             if mudou_idioma:                 # refaz a interface já no idioma novo
@@ -8989,6 +9049,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
                 return gpu.alternar_fsr()
             if nome == self.atalho("interp"):
                 return gpu.proxima_interp()
+            if nome == self.atalho("comparar"):
+                return gpu.alternar_comparar()
         if nome and nome == self.atalho("gravar") and self.aba == "tela" and getattr(self, "tl_cap", None) \
                 and not (e.state & 0x4 and e.state & 0x1):
             return self.tl_gravar()

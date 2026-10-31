@@ -75,7 +75,8 @@ A janela pode ser maximizada: a interface aumenta junto.
 | `F` | Liga e desliga o FSR (na tela cheia da aba Tela) |
 | `I` | Troca a fluidez com IA (na tela cheia da aba Tela) |
 | `R` | Começa e para a gravação (aba Tela) |
-| `Ctrl` + `Shift` + `F` / `I` / `R` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
+| `C` | Comparador: divide a tela cheia, metade sem filtros e metade com filtros |
+| `Ctrl` + `Shift` + `F` / `I` / `R` / `C` | O mesmo, mas funciona com qualquer janela em foco (Discord, navegador…) |
 | `Esc` | Sai da tela cheia |
 
 ## Rodar pelo código ou gerar o .exe
