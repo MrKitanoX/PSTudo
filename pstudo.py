@@ -3660,7 +3660,7 @@ void main() {
 # 0 = desligada; 2…6 = multiplica os quadros do jogo; INTERP_NATIVO = acompanha o Hz do monitor
 INTERP_NATIVO = -1
 INTERP_OPCOES = {"Desligada": 0, "x2": 2, "x3": 3, "x4": 4, "x5": 5, "x6": 6, "Nativo": INTERP_NATIVO}
-FAIXAS_COR = ("Automática", "Limitada", "Completa")
+FAIXAS_COR = ("Automática", "Limitada", "Desligada")
 FORMATOS_CAPTURA = ("Automático", "Sem compressão", "MJPEG")
 LEITURAS_CAPTURA = ("Automática", "Media Foundation", "DirectShow")
 NIVEIS_IA = {"Automática": None, "Leve": 640, "Equilibrada": 960, "Alta": 1280}
@@ -3932,7 +3932,7 @@ class TelaCheiaGPU:
         def faixa_agora():
             f = self.opcoes.get("faixa", "Automática")
             if f == "Automática":
-                f = "Limitada" if getattr(self.cap, "faixa_detectada", "") == "limitada" else "Completa"
+                f = "Limitada" if getattr(self.cap, "faixa_detectada", "") == "limitada" else "Desligada"
             self.faixa_atual = f
             return 1 if f == "Limitada" else 0
 
@@ -4750,12 +4750,22 @@ class Captura:
     # ---- abrir a placa no formato certo
     def _abrir(self, cv2, fourcc, via="DSHOW"):
         if via == "MSMF":
-            # Media Foundation: a leitura nova do Windows, com decodificação na placa de vídeo
-            try:
-                cap = cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF,
-                                       [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
-            except Exception:
-                cap = cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF)
+            # Media Foundation: a leitura nova do Windows. Primeiro com decodificação na placa de vídeo;
+            # muitas placas de captura não aceitam isso e só abrem sem a aceleração.
+            cap = None
+            for params in ([cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY], None):
+                try:
+                    cap = (cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF, params) if params
+                           else cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF))
+                except Exception:
+                    cap = None
+                if cap is not None and cap.isOpened():
+                    break
+                if cap is not None:
+                    cap.release()
+                cap = None
+            if cap is None:
+                return None
         else:
             cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
         if not cap.isOpened():
@@ -4804,8 +4814,9 @@ class Captura:
         vias = []
         if WIN and self.fonte_mf is not None and self.leitura != "DirectShow":
             vias.append("MSMF")
-        if self.leitura != "Media Foundation" or not vias:
-            vias.append("DSHOW")
+        vias.append("DSHOW")        # mesmo escolhendo Media Foundation: se ele não abrir, a imagem aparece assim mesmo
+        if self.leitura == "Media Foundation" and self.fonte_mf is None:
+            self.aviso_leitura = "o Media Foundation não achou esta placa; usando DirectShow"
         candidatos = [(v, f) for v in vias for f in formatos]
         if self.formato == "Automático" and self.preferido:          # o que deu certo da última vez primeiro
             via_p, _, fmt_p = str(self.preferido).rpartition(":")
@@ -4813,9 +4824,13 @@ class Captura:
             if par in candidatos:
                 candidatos.remove(par)
                 candidatos.insert(0, par)
+        nao_abre = set()
         for i, (via, fcc) in enumerate(candidatos):
+            if via in nao_abre:
+                continue
             cap = self._abrir(cv2, fcc, via)
             if cap is None:
+                nao_abre.add(via)         # não abriu nem uma vez: os outros formatos dessa leitura também não
                 continue
             # último candidato: fica com ele mesmo que não esteja perfeito
             if i == len(candidatos) - 1 or self._aguenta(cap, cv2, fcc):
@@ -4833,6 +4848,8 @@ class Captura:
             return
         arquivo = fcc == "arquivo"
         via, _, fmt = fcc.rpartition(":")
+        if self.leitura == "Media Foundation" and via == "DSHOW" and not getattr(self, "aviso_leitura", ""):
+            self.aviso_leitura = "o Media Foundation não abriu esta placa; usando DirectShow"
         self.formato_usado = {"YUY2": "sem compressão (YUY2)", "NV12": "sem compressão (NV12)", "MJPG": "MJPEG",
                               "arquivo": "arquivo"}.get(fmt, fmt)
         if via == "MSMF":
@@ -5240,6 +5257,8 @@ class Tela:
             txt += traduzir(" • cor 16-235 corrigida")
         if cap.formato_usado:
             txt += " • " + traduzir(cap.formato_usado)
+        if getattr(cap, "aviso_leitura", ""):
+            txt += " • " + traduzir(cap.aviso_leitura)
         return txt
 
     def tl_desenhar(self, geracao=None):
@@ -5296,6 +5315,8 @@ class Tela:
                 txt += traduzir(f" (jogo a {cap.fps_distintos:.0f})")
             if cap.formato_usado:
                 txt += " • " + traduzir(cap.formato_usado)
+            if getattr(cap, "aviso_leitura", ""):
+                txt += " • " + traduzir(cap.aviso_leitura)
             if self.tl_audio_msg:
                 txt += "   " + traduzir(self.tl_audio_msg)
             self.c.itemconfig(self.tl_info, text=txt)
@@ -5380,7 +5401,7 @@ class Tela:
 
         def mudou_nit(v):
             self.cfg["tela_nitidez"] = round(float(v), 2)
-            rot_nit.configure(text=f"{round(float(v) * 100)}%")
+            rot_nit.configure(text=f"{round(float(v) * 100)}%" if float(v) > 0 else traduzir("Desligada"))
             self._tl_aplicar_opcoes()
         sl = ctk.CTkSlider(linha, from_=0, to=1, number_of_steps=20, height=16, button_color="#E5ECF8",
                            progress_color="#0070D1", fg_color="#22304D", command=mudou_nit)
@@ -5410,9 +5431,10 @@ class Tela:
         def mudou_faixa(v):
             self.cfg["tela_faixa"] = v
             self._tl_aplicar_opcoes()
-        segmentado(FAIXAS_COR, self.cfg.get("tela_faixa", "Automática"), mudou_faixa)
-        explica("Corrige preto acinzentado e cores lavadas quando o PS3 manda RGB Limitado (o padrão dele) e a "
-                "placa mostra como Completo. Automática descobre sozinha em alguns segundos.")
+        faixa_salva = self.cfg.get("tela_faixa", "Automática")
+        segmentado(FAIXAS_COR, "Desligada" if faixa_salva == "Completa" else faixa_salva, mudou_faixa)
+        explica("Corrige preto acinzentado e cores lavadas quando o PS3 manda RGB Limitado (o padrão dele). "
+                "Automática descobre sozinha em alguns segundos; Limitada corrige sempre; Desligada não mexe na cor.")
         titulo("Formato da placa de captura")
 
         def mudou_formato(v):
