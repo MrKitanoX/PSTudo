@@ -3693,6 +3693,8 @@ FORMATOS_CAPTURA = ("Automático", "Sem compressão", "MJPEG")
 LEITURAS_CAPTURA = ("Automática", "Media Foundation", "DirectShow")
 NIVEIS_IA = {"Automática": None, "Leve": 640, "Equilibrada": 960, "Alta": 1280}
 LARGURAS_IA = (1280, 960, 640)
+VAGAS_IA = 8          # quadros do jogo guardados na GPU (60 fps x 8 = 133 ms de linha do tempo)
+ORCAMENTO_IA = 0.6   # fração do tempo da placa de vídeo que a fluidez pode usar
 
 
 class TelaCheiaGPU:
@@ -3722,6 +3724,7 @@ class TelaCheiaGPU:
         self.fonte_fps = 0.0
         self.atraso_ms = 0.0
         self.ia_info = ""
+        self.passos_ia = 0
         self.ia_falhou = ""
         self.faixa_atual = ""
         self.aviso_txt, self.aviso_t = None, 0.0
@@ -3834,6 +3837,41 @@ class TelaCheiaGPU:
             self.terminou.set()
             self.ao_fechar(self.erro)
 
+    @staticmethod
+    def _intervalo_troca(pygame, n):
+        """Liga/desliga a sincronização com o monitor. O pygame-ce não tem gl_set_swap_interval:
+        chama o SDL_GL_SetSwapInterval da mesma SDL2 que o pygame carregou."""
+        f = getattr(pygame.display, "gl_set_swap_interval", None)
+        if f is not None:
+            try:
+                f(n)
+                return True
+            except Exception:
+                return False
+        import ctypes
+        candidatos = []
+        if WIN:
+            # a cópia da SDL2 que o pygame já carregou (o .exe leva duas; outra cópia não tem a janela)
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetModuleHandleW.restype = ctypes.c_void_p
+            k32.GetModuleHandleW.argtypes = [ctypes.c_wchar_p]
+            h = k32.GetModuleHandleW("SDL2.dll")
+            if h:
+                candidatos.append(("SDL2.dll", h))
+        pasta = os.path.dirname(pygame.__file__)
+        nomes = [os.path.join(pasta, "SDL2.dll"), "SDL2.dll"] if WIN else \
+            [os.path.join(pasta, "libSDL2-2.0.so.0"), "libSDL2-2.0.so.0"]
+        candidatos += [(n, None) for n in nomes]
+        for nome, h in candidatos:
+            try:
+                sdl = ctypes.CDLL(nome, handle=h) if h else ctypes.CDLL(nome)
+            except OSError:
+                continue
+            sdl.SDL_GL_SetSwapInterval.argtypes = [ctypes.c_int]
+            sdl.SDL_GL_SetSwapInterval.restype = ctypes.c_int
+            return sdl.SDL_GL_SetSwapInterval(int(n)) == 0
+        return False
+
     # ---- janela e contexto OpenGL (4.3 para a IA rodar mais rápido; 3.3 se a placa não tiver)
     def _abrir_janela(self, pygame, moderngl, larg, alt):
         ultimo = None
@@ -3867,10 +3905,12 @@ class TelaCheiaGPU:
             pass
         pygame.display.set_caption("PSTudo — Tela")
         pygame.mouse.set_visible(False)
+        hz_windows = 0
         try:
-            self.hz_monitor = int(round(pygame.display.get_current_refresh_rate())) or 60
+            hz_windows = int(round(pygame.display.get_current_refresh_rate()))
         except Exception:
-            self.hz_monitor = 60
+            pass
+        self.hz_monitor = hz_windows or 60
         progs = {n: ctx.program(vertex_shader=VS_TELA, fragment_shader=fs)
                  for n, fs in (("escala", FS_ESCALA), ("rcas", FS_RCAS), ("aviso", FS_AVISO))}
         vaos = {n: ctx.vertex_array(p_, []) for n, p_ in progs.items()}
@@ -4033,7 +4073,7 @@ class TelaCheiaGPU:
             try:
                 if ia["rede"] is None:
                     from pstudo_ia import RifeGL, VS as VS_IA, FS_MONTA
-                    ia["rede"] = RifeGL(ctx, vagas=5)
+                    ia["rede"] = RifeGL(ctx, vagas=VAGAS_IA)
                     cache["prog_monta"] = ctx.program(vertex_shader=VS_IA.replace("{ver}", "330"),
                                                       fragment_shader=FS_MONTA)
                     cache["vao_monta"] = ctx.vertex_array(cache["prog_monta"], [])
@@ -4079,8 +4119,9 @@ class TelaCheiaGPU:
                     pass
             return saida
 
-        def ajustar_nivel(w):
-            """Automática: diminui a rede se a placa de vídeo estiver apertada, aumenta se sobrar folga."""
+        def ajustar_nivel(w, falta=False):
+            """Automática: diminui a rede se a placa de vídeo estiver apertada (ou se não couberem as imagens
+            que a fluidez pede), aumenta se sobrar folga."""
             if not ia["medidas"] or NIVEIS_IA.get(self.opcoes.get("ia", "Automática")):
                 return
             agora_ = time.perf_counter()
@@ -4091,9 +4132,9 @@ class TelaCheiaGPU:
                 return
             niveis = [n for n in LARGURAS_IA if n <= max(w, 640)]
             i = niveis.index(ia["nivel"]) if ia["nivel"] in niveis else len(niveis) - 1
-            if carga > 0.55 and i < len(niveis) - 1:
+            if (carga > 0.55 or falta) and i < len(niveis) - 1:
                 ia["nivel"] = niveis[i + 1]
-            elif carga < 0.18 and i > 0:
+            elif carga < 0.18 and not falta and i > 0:
                 ia["nivel"] = niveis[i - 1]
             else:
                 return
@@ -4142,7 +4183,7 @@ class TelaCheiaGPU:
             for velho in [v for v in quadros if v["vaga"] == prox_vaga]:
                 quadros.remove(velho)
                 pool.append(velho["tex"])
-            prox_vaga = (prox_vaga + 1) % 5
+            prox_vaga = (prox_vaga + 1) % VAGAS_IA
             if quadros and 0 < ts - quadros[-1]["ts"] < 0.25:
                 deltas.append(ts - quadros[-1]["ts"])
                 del deltas[:-60]
@@ -4178,13 +4219,16 @@ class TelaCheiaGPU:
             aviso_ativo = bool(self.aviso_txt) and time.perf_counter() - self.aviso_t < 1.3
             quer_vsync = bool(self.opcoes.get("vsync", True))
             if quer_vsync != vsync:
-                try:
-                    pygame.display.gl_set_swap_interval(1 if quer_vsync else 0)
-                except Exception:
+                pedido_vs = quer_vsync
+                if not self._intervalo_troca(pygame, 1 if quer_vsync else 0) and quer_vsync:
                     quer_vsync = False
+                if vsync is None or pedido_vs:
+                    registrar(f"VSync pedido {pedido_vs}: {'ligado' if quer_vsync else 'desligado'}")
                 vsync = quer_vsync
+                self.opcoes["vsync"] = quer_vsync     # não tenta de novo a cada imagem se a placa recusar
             hz = self.hz_monitor or 60
-            if len(trocas) >= 30:
+            # o Hz que o Windows informa é exato; a medida das trocas varia (fila do driver) e só vale sem ele
+            if len(trocas) >= 30 and not hz_windows:
                 medio = sorted(trocas)[len(trocas) // 2]
                 if 1 / 400 < medio < 1 / 20 and vsync:
                     hz = 1 / medio
@@ -4236,17 +4280,28 @@ class TelaCheiaGPU:
                 recentes = sorted(deltas[-90:]) if deltas else [1 / 30]
                 longo = recentes[min(len(recentes) - 1, int(len(recentes) * 0.97))]
                 gasto_ia = (sorted(ia["medidas"])[len(ia["medidas"]) // 2] if ia["medidas"] else 0.004)
-                alvo = min(0.2, longo + (periodo if vsync else 0.0) + gasto_ia + 0.004)
+                # quantas imagens por quadro do jogo a placa de vídeo aguenta (orçamento de tempo da IA)
+                ritmo_jogo = 1.0 / max(1 / 240, sorted(deltas[-60:])[len(deltas[-60:]) // 2]) if deltas else 30.0
+                cabe = int(ORCAMENTO_IA / max(gasto_ia, 1e-4) / ritmo_jogo) + 1
+                quer = modo if modo != INTERP_NATIVO else max(2, int(math.ceil(hz / ritmo_jogo - 0.05)))
+                passos = min(quer, cabe)
+                self.passos_ia = passos
+                # sem folga para a IA (só quadros de verdade): o tempo dela não entra no atraso
+                alvo = min(0.2, longo + (periodo if vsync else 0.0) + (gasto_ia if passos >= 2 else 0.0) + 0.004)
                 if alvo > atraso:
                     atraso += min(alvo - atraso, 0.0015 if conteudo_ant else 1.0)
                 elif atraso - alvo > 0.006:
-                    atraso -= 0.00003
+                    # volta para o alvo devagar (no máximo ~6% mais rápido que o jogo): sem tranco
+                    atraso -= min(atraso - alvo, max(0.00003, (atraso - alvo) * 0.003, periodo * 0.06 * 0.25))
+                # nunca fica tão atrás que o quadro necessário já tenha saído da GPU
+                janela = (quadros[-1]["ts"] - quadros[0]["ts"]) if len(quadros) > 1 else 0.0
+                atraso = min(atraso, 0.2, alvo + 0.06, max(alvo, janela + (periodo if vsync else 0.0)))
                 conteudo = aparece - atraso
                 if conteudo < conteudo_ant:
                     conteudo = conteudo_ant          # o tempo da imagem nunca volta
                 conteudo_ant = conteudo
                 if conteudo > quadros[-1]["ts"]:     # o próximo quadro atrasou: segura o último e aumenta a folga
-                    atraso += min(conteudo - quadros[-1]["ts"], 0.005)
+                    atraso = min(atraso + min(conteudo - quadros[-1]["ts"], 0.005), alvo + 0.06, 0.2)
                 self.atraso_ms = atraso * 1000
                 # par de quadros em volta do instante que vai para a tela
                 qa = qb = None
@@ -4259,12 +4314,14 @@ class TelaCheiaGPU:
                     qa = quadros[0]
                 saida, chave = qa["tex"], ("q", qa["id"])
                 if qb is not None and rede is not None and not qb["corte"] and qb["ts"] - qa["ts"] < 0.12 \
-                        and (qa["w"], qa["h"]) == (qb["w"], qb["h"]):
+                        and (qa["w"], qa["h"]) == (qb["w"], qb["h"]) and passos >= 2:
                     alfa = (conteudo - qa["ts"]) / (qb["ts"] - qa["ts"])
                     # Nativo: o instante exato de cada batida do monitor (passo igual sempre, sem tremer);
-                    # xN: N imagens por quadro do jogo
-                    alfa_q = alfa if modo == INTERP_NATIVO else int(alfa * modo) / modo
-                    if modo == INTERP_NATIVO and alfa < 0.02:
+                    # xN (ou Nativo sem folga na placa de vídeo): N imagens por quadro do jogo, cada uma
+                    # repetida nas batidas seguintes até a próxima
+                    exato = modo == INTERP_NATIVO and passos >= quer
+                    alfa_q = alfa if exato else int(alfa * passos) / passos
+                    if exato and alfa < 0.02:
                         alfa_q = 0.0
                     if alfa_q >= 1.0:
                         saida, chave = qb["tex"], ("q", qb["id"])
@@ -4288,7 +4345,7 @@ class TelaCheiaGPU:
                     mostradas += 1
                     chave_mostrada = chave
                 if rede is not None:
-                    ajustar_nivel(w)
+                    ajustar_nivel(w, passos < quer)
                     self.ia_info = f"IA {rede.conteudo[0]}×{rede.conteudo[1]}"
                 mostrar(saida, qa["w"], qa["h"], qa["tex"])
                 if not vsync:                         # sem sincronização: relógio próprio no Hz do monitor
@@ -4325,7 +4382,7 @@ class TelaCheiaGPU:
                 t_reg = agora
                 med = sorted(ia["medidas"])[len(ia["medidas"]) // 2] * 1000 if ia["medidas"] else 0
                 registrar(f"Tela cheia: {self.fps:.0f} fps na tela, jogo {self.fonte_fps:.0f}, Hz {hz:.1f}, "
-                          f"fluidez {modo}, {self.ia_info}, IA {med:.1f} ms x {ia_por_seg[0]:.0f}/s "
+                          f"fluidez {modo} ({self.passos_ia} por quadro), {self.ia_info}, IA {med:.1f} ms x {ia_por_seg[0]:.0f}/s "
                           f"(carga {ia['carga']:.2f}), atraso {self.atraso_ms:.0f} ms, vsync {vsync}")
         if ia["rede"] is not None:
             try:
@@ -4481,6 +4538,280 @@ def listar_placas_mf():
         return nomes
     except Exception:
         return []
+
+
+class LeitorMF:
+    """Lê a placa direto pelo Media Foundation (IMFSourceReader), sem o OpenCV no meio.
+
+    O CAP_MSMF do OpenCV pede RGB24 ao processador de vídeo do Windows e muitas placas USB só aceitam RGB32
+    ali (MF_E_INVALIDMEDIATYPE), então ele nem abre. Aqui: YUY2/NV12 chegam crus e o OpenCV converte;
+    MJPEG é decodificado pelo próprio Windows (sem aceleração, que falha em várias placas) para RGB32.
+    Imita o pedaço do cv2.VideoCapture que a Captura usa: isOpened, read, get, set e release."""
+
+    PRIMEIRO_VIDEO = 0xFFFFFFFC
+
+    def __init__(self, cv2, indice, largura, altura, fps, fourcc):
+        import ctypes
+        import uuid
+        self._ct, self._cv2 = ctypes, cv2
+        self.aberto, self.erro = False, ""
+        self._leitor = self._fonte = self._ativ = None
+        self.fps, self.fourcc, self.saida = 0.0, fourcc or "", ""
+        self.largura, self.altura = largura, altura
+        self._fps_pedido = fps
+        ct = ctypes
+
+        class GUID(ct.Structure):
+            _fields_ = [("d1", ct.c_uint32), ("d2", ct.c_ushort), ("d3", ct.c_ushort), ("d4", ct.c_ubyte * 8)]
+
+        def guid(texto):
+            u = uuid.UUID(texto)
+            g = GUID(u.fields[0], u.fields[1], u.fields[2])
+            g.d4[:] = list(u.bytes[8:])
+            return g
+
+        def sub(fcc):
+            return guid("%08x-0000-0010-8000-00aa00389b71" % int.from_bytes(fcc.encode("ascii"), "little")
+                        if isinstance(fcc, str) else "%08x-0000-0010-8000-00aa00389b71" % fcc)
+
+        self._GUID, self._guid = GUID, guid
+        self.G = {
+            "tipo_fonte": guid("c60ac5fe-252a-478f-a0ef-bc8fa5f7cad3"),
+            "vidcap": guid("8ac3587a-4ae7-42d8-99e0-0a6013eef90f"),
+            "iid_fonte": guid("279a808d-aec7-40c8-9c6b-a6b492c78a66"),
+            "iid_2d": guid("7dc9d5f9-9ed9-44ec-9bbf-0600bb589fbb"),
+            "maior": guid("48eba18e-f8c9-4687-bf11-0a74c9f96a8f"),
+            "sub": guid("f7e34c9a-42e8-4714-b74b-cb29d72c35e5"),
+            "tam": guid("1652c33d-d6b2-4012-b834-72030849a37d"),
+            "taxa": guid("c459a2e8-3d2c-4e44-b132-fee5156c7bb0"),
+            "video": guid("73646976-0000-0010-8000-00aa00389b71"),
+            "avancado": guid("0f81da2c-b537-4672-a8b2-a681b17307a3"),
+            "hw": guid("a634a91c-822b-41b9-a494-4de4643612b0"),
+            "rgb32": sub(0x16), "rgb24": sub(0x14),
+        }
+        try:
+            self._abrir(indice, sub)
+        except Exception as e:
+            self.erro = self.erro or repr(e)
+        if not self.aberto:
+            self.release()
+
+    # ---- chamadas COM pela tabela de funções
+    def _m(self, obj, i, *tipos):
+        ct = self._ct
+        tab = ct.cast(obj, ct.POINTER(ct.POINTER(ct.c_void_p))).contents
+        return ct.WINFUNCTYPE(ct.c_long, ct.c_void_p, *tipos)(tab[i])
+
+    def _soltar(self, obj):
+        if obj:
+            ct = self._ct
+            tab = ct.cast(obj, ct.POINTER(ct.POINTER(ct.c_void_p))).contents
+            ct.WINFUNCTYPE(ct.c_ulong, ct.c_void_p)(tab[2])(obj)
+
+    def _ok(self, hr, onde):
+        if hr < 0:
+            self.erro = onde if hr == -1 else f"{onde}: 0x{hr & 0xFFFFFFFF:08X}"
+            raise OSError(self.erro)
+
+    def _abrir(self, indice, sub):
+        ct, G = self._ct, self.G
+        P, U32, U64 = ct.POINTER, ct.c_uint32, ct.c_uint64
+        PG = P(self._GUID)
+        ole32, mfplat, mf, mfrw = ct.windll.ole32, ct.windll.mfplat, ct.windll.mf, ct.windll.mfreadwrite
+        ole32.CoInitializeEx(None, 0)
+        self._ok(mfplat.MFStartup(0x00020070, 0), "MFStartup")
+        self._mf_ligado = True
+        attrs = ct.c_void_p()
+        self._ok(mfplat.MFCreateAttributes(ct.byref(attrs), 1), "MFCreateAttributes")
+        self._m(attrs, 24, PG, PG)(attrs, ct.byref(G["tipo_fonte"]), ct.byref(G["vidcap"]))
+        lista, n = P(ct.c_void_p)(), U32()
+        hr = mf.MFEnumDeviceSources(attrs, ct.byref(lista), ct.byref(n))
+        self._soltar(attrs)
+        self._ok(hr, "MFEnumDeviceSources")
+        try:
+            if not 0 <= indice < n.value:
+                self._ok(-1, f"placa {indice} não existe ({n.value} no Media Foundation)")
+            for i in range(n.value):
+                if i == indice:
+                    self._ativ = ct.c_void_p(lista[i])
+                else:
+                    self._soltar(lista[i])
+        finally:
+            ole32.CoTaskMemFree(lista)
+        fonte = ct.c_void_p()
+        self._ok(self._m(self._ativ, 33, PG, P(ct.c_void_p))(self._ativ, ct.byref(G["iid_fonte"]), ct.byref(fonte)),
+                 "ActivateObject")
+        self._fonte = fonte
+        # leitor com o decodificador de software do Windows liberado (para o MJPEG), sem aceleração
+        ra = ct.c_void_p()
+        mfplat.MFCreateAttributes(ct.byref(ra), 2)
+        self._m(ra, 21, PG, U32)(ra, ct.byref(G["avancado"]), 1)
+        self._m(ra, 21, PG, U32)(ra, ct.byref(G["hw"]), 0)
+        leitor = ct.c_void_p()
+        hr = mfrw.MFCreateSourceReaderFromMediaSource(fonte, ra, ct.byref(leitor))
+        self._soltar(ra)
+        self._ok(hr, "MFCreateSourceReaderFromMediaSource")
+        self._leitor = leitor
+        # escolhe o formato nativo: o fourcc pedido no tamanho pedido, com a taxa mais perto da pedida
+        pedido = (self.fourcc or "YUY2").upper()
+        melhor, nota_melhor = None, None
+        GetNative = self._m(leitor, 5, U32, U32, P(ct.c_void_p))
+        for k in range(1000):
+            mt = ct.c_void_p()
+            if GetNative(leitor, self.PRIMEIRO_VIDEO, k, ct.byref(mt)) < 0:
+                break
+            g, tam, taxa = self._GUID(), U64(), U64()
+            self._m(mt, 10, PG, PG)(mt, ct.byref(G["sub"]), ct.byref(g))
+            self._m(mt, 8, PG, P(U64))(mt, ct.byref(G["tam"]), ct.byref(tam))
+            self._m(mt, 8, PG, P(U64))(mt, ct.byref(G["taxa"]), ct.byref(taxa))
+            fcc = g.d1.to_bytes(4, "little").decode("ascii", "replace").upper()
+            w, h = tam.value >> 32, tam.value & 0xFFFFFFFF
+            num, den = taxa.value >> 32, taxa.value & 0xFFFFFFFF
+            q = num / den if den else 0.0
+            if fcc == pedido and (w, h) == (self.largura, self.altura):
+                nota = abs(q - self._fps_pedido) if hasattr(self, "_fps_pedido") else 0
+                if melhor is None or nota < nota_melhor:
+                    if melhor is not None:
+                        self._soltar(melhor[0])
+                    melhor, nota_melhor = (mt, q), nota
+                    continue
+            self._soltar(mt)
+        if melhor is None:
+            self._ok(-1, f"sem {pedido} {self.largura}x{self.altura} no Media Foundation")
+        mt, self.fps = melhor
+        SetCurrent = self._m(leitor, 7, U32, ct.c_void_p, ct.c_void_p)
+        self._m(leitor, 4, U32, ct.c_int)(leitor, 0xFFFFFFFE, 0)            # todos os fluxos desligados...
+        self._m(leitor, 4, U32, ct.c_int)(leitor, self.PRIMEIRO_VIDEO, 1)   # ...menos o vídeo
+        hr = SetCurrent(leitor, self.PRIMEIRO_VIDEO, None, mt)
+        self._soltar(mt)
+        self._ok(hr, "SetCurrentMediaType(nativo)")
+        self.saida = pedido
+        if pedido not in ("YUY2", "NV12"):            # comprimido: o Windows decodifica
+            for nome in ("rgb32", "rgb24"):
+                out = ct.c_void_p()
+                mfplat.MFCreateMediaType(ct.byref(out))
+                self._m(out, 24, PG, PG)(out, ct.byref(G["maior"]), ct.byref(G["video"]))
+                self._m(out, 24, PG, PG)(out, ct.byref(G["sub"]), ct.byref(G[nome]))
+                hr = SetCurrent(leitor, self.PRIMEIRO_VIDEO, None, out)
+                self._soltar(out)
+                if hr >= 0:
+                    self.saida = nome.upper()
+                    break
+            self._ok(hr, "SetCurrentMediaType(RGB)")
+        self.aberto = True
+
+    # ---- interface parecida com a do cv2.VideoCapture
+    def isOpened(self):
+        return self.aberto
+
+    def get(self, prop):
+        cv2 = self._cv2
+        if prop == cv2.CAP_PROP_FOURCC:
+            return float(cv2.VideoWriter_fourcc(*self.fourcc)) if len(self.fourcc) == 4 else 0.0
+        if prop == cv2.CAP_PROP_FPS:
+            return float(self.fps)
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(self.largura)
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(self.altura)
+        return 0.0
+
+    def set(self, prop, valor):
+        return False
+
+    def read(self):
+        if not self.aberto:
+            return False, None
+        ct = self._ct
+        P, U32 = ct.POINTER, ct.c_uint32
+        ReadSample = self._m(self._leitor, 9, U32, U32, P(U32), P(U32), P(ct.c_int64), P(ct.c_void_p))
+        for _ in range(20):
+            idx, flags, ts, amostra = U32(), U32(), ct.c_int64(), ct.c_void_p()
+            hr = ReadSample(self._leitor, self.PRIMEIRO_VIDEO, 0, ct.byref(idx), ct.byref(flags), ct.byref(ts),
+                            ct.byref(amostra))
+            if hr < 0 or flags.value & 0x3:          # erro ou fim do fluxo (placa sumiu)
+                if hr < 0:
+                    self.erro = f"ReadSample: 0x{hr & 0xFFFFFFFF:08X}"
+                return False, None
+            if amostra:
+                try:
+                    return True, self._converter(amostra)
+                except Exception as e:
+                    self.erro = repr(e)
+                    return False, None
+                finally:
+                    self._soltar(amostra)
+        return False, None
+
+    def _converter(self, amostra):
+        import numpy as np
+        ct, cv2 = self._ct, self._cv2
+        P = ct.POINTER
+        w, h = self.largura, self.altura
+        buf = ct.c_void_p()
+        self._ok(self._m(amostra, 41, P(ct.c_void_p))(amostra, ct.byref(buf)), "ConvertToContiguousBuffer")
+        try:
+            b2 = ct.c_void_p()
+            if self._m(buf, 0, P(self._GUID), P(ct.c_void_p))(buf, ct.byref(self.G["iid_2d"]), ct.byref(b2)) >= 0:
+                try:   # IMF2DBuffer: dá a linha de cima e o passo (pode ser negativo em RGB)
+                    lin0, passo = ct.c_void_p(), ct.c_long()
+                    self._ok(self._m(b2, 3, P(ct.c_void_p), P(ct.c_long))(b2, ct.byref(lin0), ct.byref(passo)), "Lock2D")
+                    try:
+                        return self._montar(np, lin0.value, passo.value, w, h)
+                    finally:
+                        self._m(b2, 4)(b2)
+                finally:
+                    self._soltar(b2)
+            dados, maximo, atual = ct.c_void_p(), ct.c_uint32(), ct.c_uint32()
+            self._ok(self._m(buf, 3, P(ct.c_void_p), P(ct.c_uint32), P(ct.c_uint32))(
+                buf, ct.byref(dados), ct.byref(maximo), ct.byref(atual)), "Lock")
+            try:
+                linhas = h * 3 // 2 if self.saida == "NV12" else h
+                return self._montar(np, dados.value, atual.value // linhas, w, h)
+            finally:
+                self._m(buf, 4)(buf)
+        finally:
+            self._soltar(buf)
+
+    def _montar(self, np, ender, passo, w, h):
+        ct, cv2 = self._ct, self._cv2
+        linhas = h * 3 // 2 if self.saida == "NV12" else h
+        ap = abs(passo)
+        inicio = ender if passo > 0 else ender + passo * (linhas - 1)
+        cru = np.empty((linhas, ap), np.uint8)
+        ct.memmove(cru.ctypes.data, inicio, ap * linhas)
+        if passo < 0:
+            cru = np.ascontiguousarray(cru[::-1])
+        if self.saida == "YUY2":
+            return cv2.cvtColor(cru[:, :w * 2].reshape(h, w, 2), cv2.COLOR_YUV2BGR_YUY2)
+        if self.saida == "NV12":
+            return cv2.cvtColor(np.ascontiguousarray(cru[:, :w]), cv2.COLOR_YUV2BGR_NV12)
+        if self.saida == "RGB32":
+            return cv2.cvtColor(cru[:, :w * 4].reshape(h, w, 4), cv2.COLOR_BGRA2BGR)
+        return np.ascontiguousarray(cru[:, :w * 3].reshape(h, w, 3))
+
+    def release(self):
+        self.aberto = False
+        ct = self._ct
+        for nome in ("_leitor", "_fonte"):
+            obj = getattr(self, nome, None)
+            if obj:
+                self._soltar(obj)
+            setattr(self, nome, None)
+        ativ = getattr(self, "_ativ", None)
+        if ativ:
+            try:
+                self._m(ativ, 34)(ativ)      # ShutdownObject: solta a placa para outra leitura
+            except Exception:
+                pass
+            self._soltar(ativ)
+            self._ativ = None
+        if getattr(self, "_mf_ligado", False):
+            self._mf_ligado = False
+            try:
+                ct.windll.mfplat.MFShutdown()
+            except Exception:
+                pass
 
 
 # =============================================================== gravação (ffmpeg com o codificador da placa de vídeo)
@@ -4785,24 +5116,19 @@ class Captura:
     # ---- abrir a placa no formato certo
     def _abrir(self, cv2, fourcc, via="DSHOW"):
         if via == "MSMF":
-            # Media Foundation: a leitura nova do Windows. Primeiro com decodificação na placa de vídeo;
-            # muitas placas de captura não aceitam isso e só abrem sem a aceleração.
-            cap = None
-            for params in ([cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY], None):
-                try:
-                    cap = (cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF, params) if params
-                           else cv2.VideoCapture(self.fonte_mf, cv2.CAP_MSMF))
-                except Exception:
-                    cap = None
-                if cap is not None and cap.isOpened():
-                    registrar(f"Media Foundation: placa {self.fonte_mf} aberta ({'com' if params else 'sem'} aceleração)")
-                    break
-                registrar(f"Media Foundation: placa {self.fonte_mf} não abriu ({'com' if params else 'sem'} aceleração)")
-                if cap is not None:
-                    cap.release()
-                cap = None
-            if cap is None:
+            # Media Foundation lido direto (LeitorMF): o CAP_MSMF do OpenCV não abre muitas placas USB
+            w, h, fps = self.modo
+            try:
+                cap = LeitorMF(cv2, self.fonte_mf, w, h, fps, fourcc or "YUY2")
+            except Exception as e:
+                registrar(f"Media Foundation: placa {self.fonte_mf} {fourcc}: {e!r}")
                 return None
+            if not cap.isOpened():
+                registrar(f"Media Foundation: placa {self.fonte_mf} {fourcc} não abriu ({cap.erro})")
+                return None
+            registrar(f"Media Foundation: placa {self.fonte_mf} aberta em {fourcc} {w}x{h} @{cap.fps:.2f} "
+                      f"(saída {cap.saida})")
+            return cap
         else:
             cap = cv2.VideoCapture(self.fonte, cv2.CAP_DSHOW if WIN else cv2.CAP_ANY)
         if not cap.isOpened():
@@ -4858,6 +5184,9 @@ class Captura:
         if self.formato == "Automático" and self.preferido:          # o que deu certo da última vez primeiro
             via_p, _, fmt_p = str(self.preferido).rpartition(":")
             par = (via_p or "DSHOW", fmt_p)
+            # leitura escolhida à mão manda mais que a lembrança da última vez
+            if self.leitura == "Media Foundation" and par[0] != "MSMF":
+                par = None
             if par in candidatos:
                 candidatos.remove(par)
                 candidatos.insert(0, par)
