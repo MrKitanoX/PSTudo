@@ -35,6 +35,34 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 APP_NOME = "PSTudo"
+# Media Foundation: as "transformações na placa de vídeo" do OpenCV impedem muitas placas de captura de abrir
+os.environ.setdefault("OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS", "0")
+ARQ_REGISTRO = os.path.join(os.path.expanduser("~"), "PSTudo", "registro.txt")
+
+
+def registrar(texto):
+    """Linha no registro de diagnóstico (~/PSTudo/registro.txt)."""
+    try:
+        os.makedirs(os.path.dirname(ARQ_REGISTRO), exist_ok=True)
+        with open(ARQ_REGISTRO, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + str(texto) + "\n")
+    except Exception:
+        pass
+
+
+def _iniciar_registro():
+    """No .exe (sem console), os avisos do OpenCV/ffmpeg vão para o registro em vez de sumir."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        os.makedirs(os.path.dirname(ARQ_REGISTRO), exist_ok=True)
+        if os.path.exists(ARQ_REGISTRO) and os.path.getsize(ARQ_REGISTRO) > 2_000_000:
+            os.replace(ARQ_REGISTRO, ARQ_REGISTRO + ".antigo")
+        f = open(ARQ_REGISTRO, "a", encoding="utf-8", buffering=1)
+        os.dup2(f.fileno(), 2)
+        sys.stderr = f
+    except Exception:
+        pass
 CONFIG = os.path.join(os.path.expanduser("~"), ".pstudo.json")
 CONFIG_ANTIGA = os.path.join(os.path.expanduser("~"), ".ps3_transfer.json")   # versões antigas do app
 BLOCO = 1024 * 1024
@@ -4089,6 +4117,7 @@ class TelaCheiaGPU:
         prox_relogio = time.perf_counter()
         ia_cont, ia_por_seg, t_ia = 0, [0.0], time.time()
         relogio_tela = [None]          # hora (alisada) da última batida do monitor
+        t_reg = time.time()
 
         def guardar_quadro(item):
             nonlocal prox_vaga, prox_id
@@ -4292,6 +4321,12 @@ class TelaCheiaGPU:
                 distintos, t_dist = 0, agora
             if agora - t_ia >= 1:
                 ia_por_seg[0], ia_cont, t_ia = ia_cont / (agora - t_ia), 0, agora
+            if agora - t_reg >= 5:
+                t_reg = agora
+                med = sorted(ia["medidas"])[len(ia["medidas"]) // 2] * 1000 if ia["medidas"] else 0
+                registrar(f"Tela cheia: {self.fps:.0f} fps na tela, jogo {self.fonte_fps:.0f}, Hz {hz:.1f}, "
+                          f"fluidez {modo}, {self.ia_info}, IA {med:.1f} ms x {ia_por_seg[0]:.0f}/s "
+                          f"(carga {ia['carga']:.2f}), atraso {self.atraso_ms:.0f} ms, vsync {vsync}")
         if ia["rede"] is not None:
             try:
                 ia["rede"].liberar()
@@ -4760,7 +4795,9 @@ class Captura:
                 except Exception:
                     cap = None
                 if cap is not None and cap.isOpened():
+                    registrar(f"Media Foundation: placa {self.fonte_mf} aberta ({'com' if params else 'sem'} aceleração)")
                     break
+                registrar(f"Media Foundation: placa {self.fonte_mf} não abriu ({'com' if params else 'sem'} aceleração)")
                 if cap is not None:
                     cap.release()
                 cap = None
@@ -4848,6 +4885,7 @@ class Captura:
             return
         arquivo = fcc == "arquivo"
         via, _, fmt = fcc.rpartition(":")
+        registrar(f"Placa aberta: {fcc} (leitura escolhida: {self.leitura}, índice MF: {self.fonte_mf})")
         if self.leitura == "Media Foundation" and via == "DSHOW" and not getattr(self, "aviso_leitura", ""):
             self.aviso_leitura = "o Media Foundation não abriu esta placa; usando DirectShow"
         self.formato_usado = {"YUY2": "sem compressão (YUY2)", "NV12": "sem compressão (NV12)", "MJPG": "MJPEG",
@@ -5100,6 +5138,7 @@ class Tela:
             salvos[_k] = fcc
         mf = getattr(self, "tl_videos_mf", [])
         fonte_mf = mf.index(nome_v) if mf.count(nome_v) == 1 else None    # mesma placa no Media Foundation
+        registrar(f"Iniciar: placa '{nome_v}' (DirectShow {fonte}), lista do Media Foundation: {mf}")
         self.tl_cap = Captura(fonte, MODOS_TELA.get(modo, (1920, 1080, 60)),
                               formato=self.cfg.get("tela_formato", "Automático"), preferido=salvos.get(chave_fmt),
                               ao_escolher=escolheu, fonte_mf=fonte_mf,
@@ -5440,6 +5479,8 @@ class Tela:
         def mudou_formato(v):
             self.cfg["tela_formato"] = v
         segmentado(FORMATOS_CAPTURA, self.cfg.get("tela_formato", "Automático"), mudou_formato)
+        explica("Sem compressão não tem os quadradinhos do MJPEG e gasta menos processador, mas precisa de uma "
+                "placa USB 3.0. Automático testa e escolhe. Vale na próxima vez que clicar em Iniciar.")
         titulo("Leitura da placa", 12)
 
         def mudou_leitura(v):
@@ -5448,8 +5489,6 @@ class Tela:
         explica("Media Foundation é a leitura mais nova do Windows: costuma ter menos atraso e decodifica o MJPEG na "
                 "placa de vídeo. Automática tenta ela primeiro e volta para o DirectShow se a placa não aceitar. "
                 "Vale na próxima vez que clicar em Iniciar.")
-        explica("Sem compressão não tem os quadradinhos do MJPEG e gasta menos processador, mas precisa de uma "
-                "placa USB 3.0. Automático testa e escolhe. Vale na próxima vez que clicar em Iniciar.")
 
         # ---- ritmo e transmissão
         self.tl_vsync = tk.BooleanVar(value=self.cfg.get("tela_vsync", True))
@@ -8389,6 +8428,8 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self._icone = ImageTk.PhotoImage(icone_app(64))
         self.root.iconphoto(True, self._icone)
 
+        _iniciar_registro()
+        registrar("PSTudo aberto")
         self.cfg = self.carregar_cfg()
         carregar_idioma(self.cfg.get("idioma", "pt"))
         self.jogos = []
