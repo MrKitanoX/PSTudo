@@ -3479,7 +3479,8 @@ void main() {
 
 # Todas as texturas guardam a imagem com a linha 0 no topo. "virar" = desenhando direto na tela (y para cima).
 # Passo 1: leva a imagem do tamanho da placa para o tamanho da tela, corrigindo a faixa de cor.
-# modo 0 = bilinear (com média de 4 pontos ao reduzir), modo 1 = FSR 1 EASU (AMD, licença MIT).
+# modo 0 = bilinear (com média de 4 pontos ao reduzir), modo 1 = FSR 1 EASU (AMD, licença MIT),
+# modo 2 = Lanczos 3 com proteção contra halos (mais fiel ao original, sem o "pintado" do EASU).
 FS_ESCALA = """
 #version 330
 uniform sampler2D src;
@@ -3489,11 +3490,17 @@ uniform vec2 origem;
 uniform float virar;
 uniform int modo;
 uniform int faixa;        // 1 = sinal "limitado" (16-235) mostrado como completo: estica para 0-255
+uniform float gama = 1.0;       // brilho (expoente: < 1 clareia os tons médios sem estourar o branco)
+uniform float contraste = 1.0;
+uniform float saturacao = 1.0;
 out vec4 cor;
 
 vec3 corrige(vec3 c) {
     if (faixa == 1) c = clamp((c - 16.0 / 255.0) * (255.0 / 219.0), 0.0, 1.0);
-    return c;
+    if (gama != 1.0) c = pow(max(c, 0.0), vec3(gama));
+    if (contraste != 1.0) c = (c - 0.5) * contraste + 0.5;
+    if (saturacao != 1.0) c = mix(vec3(dot(c, vec3(0.2126, 0.7152, 0.0722))), c, saturacao);
+    return clamp(c, 0.0, 1.0);
 }
 vec3 px(ivec2 p) { return corrige(texelFetch(src, clamp(p, ivec2(0), ivec2(tam_in) - 1), 0).rgb); }
 float rcpLo(float a) { return uintBitsToFloat(0x7ef07ebbu - floatBitsToUint(a)); }
@@ -3572,12 +3579,41 @@ vec3 easu(vec2 ip) {
     tap(aC, aW, vec2(0.0, 2.0) - pp, dir, len2, lob, clp, n);
     return min(mx4, max(mn4, aC / aW));
 }
+float lz(float x) {
+    x = abs(x);
+    if (x < 1e-4) return 1.0;
+    if (x >= 3.0) return 0.0;
+    float a = 3.14159265 * x;
+    return 3.0 * sin(a) * sin(a / 3.0) / (a * a);
+}
+vec3 lanczos(vec2 ip) {
+    vec2 pp = (ip + 0.5) * (tam_in / tam_out) - 0.5;
+    vec2 fp = floor(pp);
+    vec2 f = pp - fp;
+    ivec2 b = ivec2(fp);
+    float wx[6], wy[6];
+    for (int i = 0; i < 6; i++) { wx[i] = lz(float(i - 2) - f.x); wy[i] = lz(float(i - 2) - f.y); }
+    vec3 acc = vec3(0.0), mn = vec3(1.0), mx = vec3(0.0);
+    float ws = 0.0;
+    for (int j = 0; j < 6; j++) {
+        for (int i = 0; i < 6; i++) {
+            vec3 c = px(b + ivec2(i - 2, j - 2));
+            float w = wx[i] * wy[j];
+            acc += c * w;
+            ws += w;
+            if (i >= 2 && i <= 3 && j >= 2 && j <= 3) { mn = min(mn, c); mx = max(mx, c); }
+        }
+    }
+    return clamp(acc / ws, mn, mx);     // não passa dos 4 vizinhos: sem halos nas bordas
+}
 void main() {
     vec2 ip = floor(gl_FragCoord.xy - origem);
     if (virar > 0.5) ip.y = tam_out.y - 1.0 - ip.y;
     vec3 c;
     if (modo == 1) {
         c = easu(ip);
+    } else if (modo == 2) {
+        c = lanczos(ip);
     } else {
         vec2 uv = (ip + 0.5) / tam_out;
         vec2 esc = tam_in / tam_out;
@@ -3602,14 +3638,17 @@ uniform vec2 tam;
 uniform vec2 origem;
 uniform float virar;
 uniform float nitidez;   // 0 = desligada, 1 = máximo
+uniform float pontilhado = 0.0;   // ruído de 1/2 tom: o degradê limpo não volta a ter faixas na tela de 8 bits
 out vec4 cor;
 vec3 px(ivec2 p) { return texelFetch(src, clamp(p, ivec2(0), ivec2(tam) - 1), 0).rgb; }
+float ruido(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+vec4 sai(vec3 c) { return vec4(c + (ruido(gl_FragCoord.xy) - 0.5) * pontilhado / 255.0, 1.0); }
 void main() {
     vec2 ip = floor(gl_FragCoord.xy - origem);
     if (virar > 0.5) ip.y = tam.y - 1.0 - ip.y;
     ivec2 p = ivec2(ip);
     vec3 e = px(p);
-    if (nitidez <= 0.0) { cor = vec4(e, 1.0); return; }
+    if (nitidez <= 0.0) { cor = sai(e); return; }
     vec3 b = px(p + ivec2(0, -1)), d = px(p + ivec2(-1, 0)), f = px(p + ivec2(1, 0)), h = px(p + ivec2(0, 1));
     vec3 mn4 = min(min(b, d), min(f, h));
     vec3 mx4 = max(max(b, d), max(f, h));
@@ -3617,7 +3656,33 @@ void main() {
     vec3 hitMax = (1.0 - mx4) / (4.0 * mn4 - 4.0 - 1e-5);
     vec3 lobeRGB = max(-hitMin, hitMax);
     float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * nitidez;
-    cor = vec4(clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 1.0), 1.0);
+    cor = sai(clamp((lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0), 0.0, 1.0));
+}
+"""
+
+# Passo 0 (opcional): limpa faixas de degradê e os quadradinhos do MJPEG nas áreas lisas, no tamanho da placa.
+# Mesma ideia do "deband" do mpv: compara o ponto com a média de 4 vizinhos a uma distância sorteada; se a
+# diferença for pequena (degrau de degradê), usa a média; se for grande (borda de verdade), mantém o ponto.
+FS_LIMPA = """
+#version 330
+uniform sampler2D src;
+uniform vec2 tam;
+uniform float forca;      // 0…1
+out vec4 cor;
+float h(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+vec3 at(vec2 p) { return texture(src, clamp(p, vec2(0.5), tam - 0.5) / tam).rgb; }
+void main() {
+    vec2 p = gl_FragCoord.xy;               // mesma linha da entrada: as duas ficam com a linha 0 no topo
+    vec3 c = at(p);
+    for (int i = 1; i <= 3; i++) {
+        float r = (4.0 + 6.0 * float(i)) * (0.5 + 0.5 * h(p + float(i)));
+        float a = 6.2831853 * h(p * 1.37 + float(i) * 7.0);
+        vec2 o = r * vec2(cos(a), sin(a));
+        vec3 m = (at(p + o) + at(p - o) + at(p + vec2(-o.y, o.x)) + at(p + vec2(o.y, -o.x))) * 0.25;
+        vec3 lim = vec3((2.0 + 3.0 * forca) / 255.0 / float(i));
+        c = mix(m, c, vec3(greaterThan(abs(c - m), lim)));
+    }
+    cor = vec4(c, 1.0);
 }
 """
 
@@ -3636,6 +3701,18 @@ void main() {
 }
 """
 
+SHADERS_TELA = {"escala": FS_ESCALA, "rcas": FS_RCAS, "aviso": FS_AVISO, "limpa": FS_LIMPA}
+ESCALAS_TELA = {"FSR 1": 1, "Lanczos": 2}
+
+
+def unis_cor(op):
+    """Ajustes de cor das opções (brilho, contraste e saturação, 0 = normal) -> variáveis do shader."""
+    brilho = max(-1.0, min(1.0, float(op.get("brilho", 0.0))))
+    return dict(gama=float(2.0 ** (-0.6 * brilho)),
+                contraste=float(max(0.0, 1.0 + float(op.get("contraste", 0.0)) * 0.5)),
+                saturacao=float(max(0.0, 1.0 + float(op.get("saturacao", 0.0)))))
+
+
 # 0 = desligada; 2…6 = multiplica os quadros do jogo; INTERP_NATIVO = acompanha o Hz do monitor
 INTERP_NATIVO = -1
 INTERP_OPCOES = {"Desligada": 0, "x2": 2, "x3": 3, "x4": 4, "x5": 5, "x6": 6, "Nativo": INTERP_NATIVO}
@@ -3647,7 +3724,7 @@ LARGURAS_IA = (1280, 960, 640)
 
 class TelaCheiaGPU:
     """Janela de tela cheia desenhada pela placa de vídeo, em uma thread própria.
-    Esc ou clique duplo fecha; os atalhos do FSR e da interpolação vêm das configurações.
+    Esc ou clique duplo fecha; os atalhos (ampliação, fluidez, foto e informações) vêm das configurações.
 
     Ritmo: com a sincronização vertical ligada, cada troca de imagem espera o monitor (sem rasgos).
     Fluidez: o RIFE (rede neural de interpolação) roda na própria placa de vídeo e cria os quadros
@@ -3657,8 +3734,9 @@ class TelaCheiaGPU:
                  atalhos=None, compativel=True, opcoes=None):
         self.cap, self.fsr, self.ao_fechar, self.ao_mudar_fsr = captura, fsr, ao_fechar, ao_mudar_fsr
         self.interp_modo, self.ao_mudar_interp = interp_modo, ao_mudar_interp
-        self.atalhos = atalhos or {"fsr": "f", "interp": "i"}
-        self.opcoes = dict(nitidez=0.5, faixa="Automática", vsync=True, ia="Automática")
+        self.atalhos = atalhos or dict(ATALHOS_PADRAO)
+        self.opcoes = dict(nitidez=0.5, faixa="Automática", vsync=True, ia="Automática", escala="FSR 1",
+                           limpar=False, brilho=0.0, contraste=0.0, saturacao=0.0, proporcao="Original")
         self.opcoes.update(opcoes or {})
         # janela 1 pixel maior que o monitor: o Windows não a trata como tela cheia exclusiva,
         # então Discord, OBS e companhia capturam sem travar
@@ -3673,6 +3751,9 @@ class TelaCheiaGPU:
         self.ia_falhou = ""
         self.faixa_atual = ""
         self.aviso_txt, self.aviso_t = None, 0.0
+        self.info_ligada = False         # painel com fps, atraso e o que está ligado (atalho)
+        self.foto_pedida = False
+        self.pasta_fotos = pasta_fotos()
         self.pronto = threading.Event()
         self.terminou = threading.Event()
         threading.Thread(target=self._rodar, daemon=True).start()
@@ -3688,7 +3769,8 @@ class TelaCheiaGPU:
 
     def definir_fsr(self, ligado):
         self.fsr = bool(ligado)
-        self.avisar(f"FSR 1: {'ligado' if self.fsr else 'desligado'}")
+        nome = self.opcoes.get("escala", "FSR 1") if self.opcoes.get("escala") in ESCALAS_TELA else "FSR 1"
+        self.avisar(f"{nome}: {'ligado' if self.fsr else 'desligado'}")
 
     def definir_interp(self, modo):
         self.interp_modo = modo
@@ -3705,6 +3787,17 @@ class TelaCheiaGPU:
         if self.ao_mudar_fsr:
             self.ao_mudar_fsr(self.fsr)
 
+    def tirar_foto(self):
+        """Salva a próxima imagem da tela (já com ampliação, cor e fluidez) em Imagens\\PSTudo."""
+        self.foto_pedida = True
+
+    def alternar_info(self):
+        self.info_ligada = not self.info_ligada
+
+    def _acoes(self):
+        return {"fsr": self.alternar_fsr, "interp": self.proxima_interp, "foto": self.tirar_foto,
+                "info": self.alternar_info}
+
     def proxima_interp(self):
         opcoes = list(INTERP_OPCOES.values())
         novo = opcoes[(opcoes.index(self.interp_modo) + 1) % len(opcoes)] if self.interp_modo in opcoes else 0
@@ -3720,9 +3813,10 @@ class TelaCheiaGPU:
         self._thread_atalhos = kernel32.GetCurrentThreadId()
         msg = wintypes.MSG()
         user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # cria a fila de mensagens desta thread
-        acoes = {1: self.alternar_fsr, 2: self.proxima_interp}
+        nomes = list(self._acoes())
+        acoes = {i + 1: f for i, f in enumerate(self._acoes().values())}
         usados = []
-        for id_, nome in ((1, "fsr"), (2, "interp")):
+        for id_, nome in ((i + 1, n) for i, n in enumerate(nomes)):
             vk = tecla_para_vk(self.atalhos.get(nome, ""))
             if vk and user32.RegisterHotKey(None, id_, 0x0002 | 0x0004 | 0x4000, vk):  # Ctrl+Shift, sem repetir
                 usados.append(id_)
@@ -3809,8 +3903,7 @@ class TelaCheiaGPU:
             self.hz_monitor = int(round(pygame.display.get_current_refresh_rate())) or 60
         except Exception:
             self.hz_monitor = 60
-        progs = {n: ctx.program(vertex_shader=VS_TELA, fragment_shader=fs)
-                 for n, fs in (("escala", FS_ESCALA), ("rcas", FS_RCAS), ("aviso", FS_AVISO))}
+        progs = {n: ctx.program(vertex_shader=VS_TELA, fragment_shader=fs) for n, fs in SHADERS_TELA.items()}
         vaos = {n: ctx.vertex_array(p_, []) for n, p_ in progs.items()}
         cache = {}
         escala_aviso = max(1.0, alt / 1080)
@@ -3819,6 +3912,11 @@ class TelaCheiaGPU:
         except Exception:
             fonte = pygame.font.Font(None, int(34 * escala_aviso))
         aviso_cache = {"txt": None, "tex": None, "tam": (0, 0)}
+        info_cache = {"txt": None, "tex": None, "tam": (0, 0), "t": 0.0}
+        try:
+            fonte_info = pygame.font.SysFont("Consolas, Cascadia Mono, DejaVu Sans Mono", int(17 * escala_aviso))
+        except Exception:
+            fonte_info = pygame.font.Font(None, int(22 * escala_aviso))
 
         def textura(nome, tam, comp=3, dtype="f1", bgr=False):
             t = cache.get(nome)
@@ -3888,6 +3986,72 @@ class TelaCheiaGPU:
                   origem=(float(x0), float(y0)), opacidade=opac)
             ctx.disable(moderngl.BLEND)
 
+        def texto_info():
+            linhas = [f"{self.fps:.0f} fps na tela • {self.hz_monitor} Hz"]
+            if self.fonte_fps:
+                linhas.append(f"jogo a {self.fonte_fps:.0f} fps")
+            m = self.interp_modo if not self.ia_falhou else 0
+            if m:
+                linhas.append(f"fluidez {texto_interp(m)} • {self.ia_info} • atraso {self.atraso_ms:.0f} ms")
+            nome_esc = self.opcoes.get("escala", "FSR 1")
+            extras = [nome_esc if self.fsr else "ampliação simples"]
+            if self.opcoes.get("limpar"):
+                extras.append("limpeza")
+            if self.faixa_atual == "Limitada":
+                extras.append("cor 16-235")
+            if self.opcoes.get("proporcao", "Original") != "Original":
+                extras.append(self.opcoes["proporcao"])
+            linhas.append(" • ".join(traduzir(x) for x in extras))
+            tam = getattr(self.cap, "tamanho", None)
+            if tam:
+                linhas.append(f"placa {tam[0]}×{tam[1]} {getattr(self.cap, 'formato_usado', '')}".strip())
+            return "\n".join(traduzir(x) for x in linhas)
+
+        def desenhar_info():
+            if not self.info_ligada:
+                return
+            agora_ = time.perf_counter()
+            if info_cache["tex"] is None or agora_ - info_cache["t"] > 0.5:
+                info_cache["t"] = agora_
+                txt = texto_info()
+                if txt != info_cache["txt"]:
+                    linhas = [fonte_info.render(x, True, (235, 240, 250)) for x in txt.split("\n")]
+                    pad = int(14 * escala_aviso)
+                    alt_l = fonte_info.get_linesize()
+                    sup = pygame.Surface((max(x.get_width() for x in linhas) + 2 * pad,
+                                          alt_l * len(linhas) + 2 * pad), pygame.SRCALPHA)
+                    pygame.draw.rect(sup, (6, 12, 24, 200), sup.get_rect(), border_radius=int(12 * escala_aviso))
+                    for i, x in enumerate(linhas):
+                        sup.blit(x, (pad, pad + i * alt_l))
+                    if info_cache["tex"] is not None:
+                        info_cache["tex"].release()
+                    t = ctx.texture(sup.get_size(), 4, pygame.image.tobytes(sup, "RGBA"))
+                    t.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                    info_cache.update(txt=txt, tex=t, tam=sup.get_size())
+            aw, ah = info_cache["tam"]
+            m = int(24 * escala_aviso)
+            x0, y0 = m, oy + alt - ah - m
+            ctx.enable(moderngl.BLEND)
+            ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
+            passo("aviso", (x0, y0, aw, ah), [(0, info_cache["tex"])], tex=0, tam=(float(aw), float(ah)),
+                  origem=(float(x0), float(y0)), opacidade=1.0)
+            ctx.disable(moderngl.BLEND)
+
+        def salvar_foto(x0, y0, vw, vh):
+            self.foto_pedida = False
+            dados = ctx.screen.read(viewport=(x0, y0, vw, vh), components=3, alignment=1)
+
+            def gravar():
+                try:
+                    os.makedirs(self.pasta_fotos, exist_ok=True)
+                    nome = time.strftime("PSTudo_%Y-%m-%d_%H-%M-%S") + f"_{int(time.time() * 1000) % 1000:03d}.png"
+                    img = Image.frombytes("RGB", (vw, vh), dados).transpose(Image.FLIP_TOP_BOTTOM)
+                    img.save(os.path.join(self.pasta_fotos, nome))
+                    self.avisar("Foto salva em " + nome_pasta_fotos(self.pasta_fotos))
+                except Exception as e:
+                    self.avisar(f"Não consegui salvar a foto ({str(e)[:40]})")
+            threading.Thread(target=gravar, daemon=True).start()
+
         def esperar_ate(alvo):
             while True:
                 falta = alvo - time.perf_counter()
@@ -3903,22 +4067,31 @@ class TelaCheiaGPU:
             return 1 if f == "Limitada" else 0
 
         def mostrar(src, w, h):
-            """Desenha a textura src (w×h, linha 0 no topo) na tela: escala/FSR, faixa de cor, nitidez, aviso."""
-            esc = min(larg / w, alt / h)
-            vw, vh = max(2, int(round(w * esc))), max(2, int(round(h * esc)))
+            """Desenha a textura src (w×h, linha 0 no topo) na tela: limpeza, escala/FSR, cor, nitidez, aviso."""
+            vw, vh = tamanho_na_tela(w, h, larg, alt, self.opcoes.get("proporcao", "Original"))
             x0, y0 = (larg - vw) // 2, oy + (alt - vh) // 2
+            limpar = bool(self.opcoes.get("limpar"))
+            if limpar:                   # passo 0: tira faixas e quadradinhos ainda no tamanho da placa
+                limpo = textura("limpo", (w, h), comp=4, dtype="f2")
+                fbo_de("limpo").use()
+                passo("limpa", (0, 0, w, h), [(0, src)], src=0, tam=(float(w), float(h)), forca=0.5)
+                src = limpo
             meio = textura("meio", (vw, vh), comp=4, dtype="f2")
-            usar_easu = self.fsr and esc > 1.01
+            ampliando = vw > w * 1.01 or vh > h * 1.01
+            modo_esc = ESCALAS_TELA.get(self.opcoes.get("escala"), 1) if self.fsr and ampliando else 0
             fbo_de("meio").use()
             passo("escala", (0, 0, vw, vh), [(0, src)], src=0, tam_in=(float(w), float(h)),
-                  tam_out=(float(vw), float(vh)), origem=(0.0, 0.0), virar=0.0, modo=int(usar_easu),
-                  faixa=faixa_agora())
+                  tam_out=(float(vw), float(vh)), origem=(0.0, 0.0), virar=0.0, modo=modo_esc,
+                  faixa=faixa_agora(), **unis_cor(self.opcoes))
             ctx.screen.use()
             ctx.viewport = (0, 0, larg, alt + oy)
             ctx.clear(0, 0, 0)
             nit = float(self.opcoes.get("nitidez", 0.5)) if self.fsr else 0.0
             passo("rcas", (x0, y0, vw, vh), [(0, meio)], src=0, tam=(float(vw), float(vh)),
-                  origem=(float(x0), float(y0)), virar=1.0, nitidez=nit)
+                  origem=(float(x0), float(y0)), virar=1.0, nitidez=nit, pontilhado=1.0 if limpar else 0.0)
+            if self.foto_pedida:
+                salvar_foto(x0, y0, vw, vh)
+            desenhar_info()
             desenhar_aviso()
             pygame.display.flip()
             if vsync:
@@ -4059,17 +4232,18 @@ class TelaCheiaGPU:
                     nome = pygame.key.name(ev.key).lower()
                     if ev.mod & pygame.KMOD_CTRL and ev.mod & pygame.KMOD_SHIFT and WIN:
                         pass                    # Ctrl+Shift já chega pelo atalho global
-                    elif nome == self.atalhos.get("fsr"):
-                        self.alternar_fsr()
-                    elif nome == self.atalhos.get("interp"):
-                        self.proxima_interp()
+                    else:
+                        for acao, func in self._acoes().items():
+                            if nome == self.atalhos.get(acao):
+                                func()
+                                break
                 elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                     agora = time.time()
                     if agora - ult_clique < 0.35:
                         self.rodando = False
                     ult_clique = agora
             modo = self.interp_modo if not self.ia_falhou else 0
-            aviso_ativo = bool(self.aviso_txt) and time.perf_counter() - self.aviso_t < 1.3
+            aviso_ativo = (bool(self.aviso_txt) and time.perf_counter() - self.aviso_t < 1.3) or self.foto_pedida
             quer_vsync = bool(self.opcoes.get("vsync", True))
             if quer_vsync != vsync:
                 try:
@@ -4211,6 +4385,35 @@ def texto_interp(modo, fonte_fps=0.0, hz_monitor=0):
     if fonte_fps >= 10:
         return f"x{modo} ({round(fonte_fps) * modo} fps)"
     return f"x{modo}"
+
+
+PROPORCOES = ("Original", "4:3", "Tela toda")
+
+
+def tamanho_na_tela(w, h, larg, alt, proporcao="Original"):
+    """Tamanho da imagem no monitor: mantém a proporção da placa, força 4:3 ou ocupa a tela toda."""
+    if proporcao == "Tela toda":
+        return larg, alt
+    aspecto = 4 / 3 if proporcao == "4:3" else w / h
+    vw, vh = larg, larg / aspecto
+    if vh > alt:
+        vw, vh = alt * aspecto, alt
+    return max(2, int(round(vw))), max(2, int(round(vh)))
+
+
+def pasta_fotos():
+    """Pasta das fotos da tela: Imagens\\PSTudo (a pasta Imagens do Windows se chama Pictures por dentro)."""
+    casa = os.path.expanduser("~")
+    for nome in ("Pictures", "Imagens", "Imágenes"):
+        if os.path.isdir(os.path.join(casa, nome)):
+            return os.path.join(casa, nome, "PSTudo")
+    return os.path.join(casa, "PSTudo fotos")
+
+
+def nome_pasta_fotos(caminho):
+    pai, ultima = os.path.split(caminho)
+    pai = os.path.basename(pai)
+    return traduzir("Imagens") + os.sep + ultima if pai == "Pictures" else os.path.join(pai, ultima)
 
 
 def tecla_para_vk(nome):
@@ -4569,8 +4772,8 @@ class Tela:
             return m
 
         self.tl_videos, self.tl_audios = [], {}
-        self.tl_m_video = menu(["Procurando placas…"], 128)
-        self.tl_m_audio = menu(["Procurando áudio…"], 128)
+        self.tl_m_video = menu(["Procurando placas…"], 112)
+        self.tl_m_audio = menu(["Procurando áudio…"], 112)
         self.tl_m_modo = menu(list(MODOS_TELA), 106)
         self.tl_m_modo.set(self.cfg.get("tela_modo") if self.cfg.get("tela_modo") in MODOS_TELA else "1080p 60")
         self.tl_btn = ctk.CTkButton(barra, text="▶  Iniciar", width=96, height=34, corner_radius=17,
@@ -4581,6 +4784,8 @@ class Tela:
                                           hover_color=BTN_HOVER, font=ctk.CTkFont(family=F_SYM, size=15),
                                           command=self.tl_tela_cheia)
         self.tl_btn_cheia.pack(side="left", padx=(0, 6))
+        ctk.CTkButton(barra, text="📷", width=34, height=34, corner_radius=17, fg_color=BTN, hover_color=BTN_HOVER,
+                      font=ctk.CTkFont(family=F_SYM, size=14), command=self.tl_foto_aba).pack(side="left", padx=(0, 6))
         self.tl_fsr = tk.BooleanVar(value=bool(self.cfg.get("tela_fsr", False)))
         self.tl_interp = self.cfg.get("tela_interp", "Desligada")
         if self.tl_interp not in INTERP_OPCOES:      # versões antigas guardavam "120 Hz" etc.
@@ -4782,6 +4987,30 @@ class Tela:
             self.c.itemconfig(self.tl_info, text=txt)
         prox(8)
 
+    def tl_foto_aba(self):
+        """Foto do quadro atual da placa, do tamanho original (na tela cheia, a foto sai como está na tela)."""
+        gpu = getattr(self, "tl_gpu", None)
+        if gpu:
+            return gpu.tirar_foto()
+        cap = getattr(self, "tl_cap", None)
+        q = cap.quadro if cap else None
+        if q is None:
+            return self._aviso_app("Inicie a placa de captura para tirar uma foto.")
+        q = q.copy()
+
+        def gravar():
+            try:
+                pasta = pasta_fotos()
+                os.makedirs(pasta, exist_ok=True)
+                nome = time.strftime("PSTudo_%Y-%m-%d_%H-%M-%S") + ".png"
+                Image.frombuffer("RGB", (q.shape[1], q.shape[0]), q.tobytes(), "raw", "BGR", 0, 1).save(
+                    os.path.join(pasta, nome))
+                self.fila.put(("cb", lambda: self._aviso_app("Foto salva em " + nome_pasta_fotos(pasta))))
+            except Exception as e:
+                self.fila.put(("cb", lambda e=e: self._aviso_app(f"Não consegui salvar a foto ({str(e)[:40]})",
+                                                                 "#F87171")))
+        threading.Thread(target=gravar, daemon=True).start()
+
     def _tl_mudou_fsr(self):
         v = bool(self.tl_fsr.get())
         self.cfg["tela_fsr"] = v
@@ -4797,14 +5026,21 @@ class Tela:
     # ---- opções de imagem
     def _tl_opcoes(self):
         return dict(nitidez=float(self.cfg.get("tela_nitidez", 0.5)), faixa=self.cfg.get("tela_faixa", "Automática"),
-                    vsync=bool(self.cfg.get("tela_vsync", True)), ia=self.cfg.get("tela_ia", "Automática"))
+                    vsync=bool(self.cfg.get("tela_vsync", True)), ia=self.cfg.get("tela_ia", "Automática"),
+                    escala=self.cfg.get("tela_escala", "FSR 1") if self.cfg.get("tela_escala") in ESCALAS_TELA
+                    else "FSR 1",
+                    limpar=bool(self.cfg.get("tela_limpar", False)),
+                    brilho=float(self.cfg.get("tela_brilho", 0.0)), contraste=float(self.cfg.get("tela_contraste", 0.0)),
+                    saturacao=float(self.cfg.get("tela_saturacao", 0.0)),
+                    proporcao=self.cfg.get("tela_proporcao", "Original") if self.cfg.get("tela_proporcao") in PROPORCOES
+                    else "Original")
 
     def _tl_aplicar_opcoes(self):
         if getattr(self, "tl_gpu", None):
             self.tl_gpu.definir_opcoes(**self._tl_opcoes())
 
     def tl_opcoes_imagem(self):
-        j = self._janela("Imagem", 500, 640)
+        j = self._janela("Imagem", 500, 680)
         f_tit = ctk.CTkFont(family=F_LIGHT, size=22)
         f_txt = ctk.CTkFont(family=F_REG, size=12)
         f_rot = ctk.CTkFont(family=F_SEMI, size=13)
@@ -4838,10 +5074,42 @@ class Tela:
                           button_color="#E5ECF8", fg_color="#2A3A5E", command=ao_mudar).pack(anchor="w", padx=14,
                                                                                            pady=(18, 0))
 
+        def deslizante(rotulo, chave_cfg, de, ate, mostrar=lambda v: f"{round(v * 100):+d}%", recuo=14):
+            linha_ = ctk.CTkFrame(corpo, fg_color="transparent")
+            linha_.pack(fill="x", padx=(recuo, 14), pady=(8, 0))
+            ctk.CTkLabel(linha_, text=rotulo, font=f_txt, text_color=BRANCO, width=78, anchor="w").pack(side="left")
+            rot = ctk.CTkLabel(linha_, text="", font=f_txt, text_color=CINZA, width=44)
+            rot.pack(side="right")
+
+            def mudou(v):
+                self.cfg[chave_cfg] = round(float(v), 2)
+                rot.configure(text=mostrar(float(v)))
+                self._tl_aplicar_opcoes()
+            s_ = ctk.CTkSlider(linha_, from_=de, to=ate, number_of_steps=40, height=16, button_color="#E5ECF8",
+                               progress_color="#0070D1", fg_color="#22304D", command=mudou)
+            s_.set(float(self.cfg.get(chave_cfg, 0.0)))
+            s_.pack(side="left", fill="x", expand=True, padx=10)
+            rot.configure(text=mostrar(s_.get()))
+            return s_, mudou
+
         # ---- nitidez e ampliação
-        chave("FSR 1 — ampliação e nitidez da AMD", self.tl_fsr, self._tl_mudou_fsr)
-        explica("Amplia a imagem para o tamanho do seu monitor sem borrar (EASU) e realça os detalhes sem "
-                f"criar contornos (RCAS). Atalho na tela cheia: {self.nome_tecla('fsr')}.", 60)
+        chave("Ampliação melhorada e nitidez", self.tl_fsr, self._tl_mudou_fsr)
+        explica("Amplia a imagem para o tamanho do seu monitor sem borrar e realça os detalhes sem criar "
+                f"contornos (RCAS da AMD). Atalho na tela cheia: {self.nome_tecla('fsr')}.", 60)
+        linha_esc = ctk.CTkFrame(corpo, fg_color="transparent")
+        linha_esc.pack(fill="x", padx=(60, 14), pady=(8, 0))
+
+        def mudou_escala(v):
+            self.cfg["tela_escala"] = v
+            self._tl_aplicar_opcoes()
+        m_esc = ctk.CTkSegmentedButton(linha_esc, values=list(ESCALAS_TELA), font=f_txt, height=30,
+                                       selected_color="#0070D1", selected_hover_color="#1888F0",
+                                       unselected_color="#16233F", unselected_hover_color="#20345C",
+                                       command=mudou_escala)
+        m_esc.set(self._tl_opcoes()["escala"])
+        m_esc.pack(fill="x")
+        explica("FSR 1 (EASU) deixa as bordas bem lisas. Lanczos é mais fiel aos detalhes finos, como texto e "
+                "texturas.", 60)
         linha = ctk.CTkFrame(corpo, fg_color="transparent")
         linha.pack(fill="x", padx=(60, 14), pady=(8, 0))
         ctk.CTkLabel(linha, text="Nitidez", font=f_txt, text_color=BRANCO).pack(side="left")
@@ -4857,6 +5125,16 @@ class Tela:
         sl.set(float(self.cfg.get("tela_nitidez", 0.5)))
         sl.pack(side="left", fill="x", expand=True, padx=10)
         mudou_nit(sl.get())
+
+        # ---- limpeza
+        self.tl_limpar = tk.BooleanVar(value=bool(self.cfg.get("tela_limpar", False)))
+
+        def mudou_limpar():
+            self.cfg["tela_limpar"] = bool(self.tl_limpar.get())
+            self._tl_aplicar_opcoes()
+        chave("Limpar faixas e quadradinhos", self.tl_limpar, mudou_limpar)
+        explica("Suaviza as faixas nos degradês (céu, sombras, névoa) e os quadradinhos do MJPEG nas áreas lisas, "
+                "sem borrar as bordas. Bom para placas que só mandam MJPEG.", 60)
 
         # ---- fluidez
         titulo("Fluidez com IA (interpolação de quadros)")
@@ -4883,6 +5161,24 @@ class Tela:
         segmentado(FAIXAS_COR, self.cfg.get("tela_faixa", "Automática"), mudou_faixa)
         explica("Corrige preto acinzentado e cores lavadas quando o PS3 manda RGB Limitado (o padrão dele) e a "
                 "placa mostra como Completo. Automática descobre sozinha em alguns segundos.")
+        titulo("Ajuste de cor")
+        cores = [deslizante("Brilho", "tela_brilho", -1, 1), deslizante("Contraste", "tela_contraste", -1, 1),
+                 deslizante("Saturação", "tela_saturacao", -1, 1)]
+
+        def zerar_cor():
+            for s_, mudou in cores:
+                s_.set(0.0)
+                mudou(0.0)
+        ctk.CTkButton(corpo, text="Voltar ao normal", width=130, height=28, corner_radius=14, fg_color=BTN,
+                      hover_color=BTN_HOVER, font=f_txt, command=zerar_cor).pack(anchor="e", padx=14, pady=(6, 0))
+        titulo("Proporção")
+
+        def mudou_prop(v):
+            self.cfg["tela_proporcao"] = v
+            self._tl_aplicar_opcoes()
+        segmentado(PROPORCOES, self._tl_opcoes()["proporcao"], mudou_prop)
+        explica("Original mantém o formato da imagem da placa. 4:3 é para jogos antigos (PS1/PS2) que aparecem "
+                "esticados. Tela toda ocupa o monitor inteiro, mesmo que não seja 16:9.")
         titulo("Formato da placa de captura")
 
         def mudou_formato(v):
@@ -4907,6 +5203,10 @@ class Tela:
                 "transmitir. Vale na próxima vez que abrir a tela cheia.\n"
                 f"Com outra janela em foco, use Ctrl+Shift+{self.nome_tecla('fsr')} (FSR) e "
                 f"Ctrl+Shift+{self.nome_tecla('interp')} (fluidez).", 60)
+        titulo("Na tela cheia")
+        explica(f"{self.nome_tecla('foto')}: tira uma foto da tela e salva em {nome_pasta_fotos(pasta_fotos())}.\n"
+                f"{self.nome_tecla('info')}: mostra e esconde o painel com fps, atraso e o que está ligado.\n"
+                "Dá para trocar as teclas em ⚙ Configurações › Atalhos.")
         ctk.CTkFrame(corpo, fg_color="transparent", height=10).pack()
 
     # ---- tela cheia
@@ -4930,7 +5230,7 @@ class Tela:
                 self.fila.put(("cb", lambda: (setattr(self, "tl_interp", nome), self.cfg.update(tela_interp=nome))))
             self.tl_gpu = TelaCheiaGPU(self.tl_cap, bool(self.tl_fsr.get()), fechou, mudou_fsr,
                                        INTERP_OPCOES.get(self.tl_interp, 0), mudou_interp,
-                                       {"fsr": self.atalho("fsr"), "interp": self.atalho("interp")},
+                                       self.atalhos_tela(),
                                        compativel=self.cfg.get("tela_compativel", True), opcoes=self._tl_opcoes())
             return
         self._tl_cheia_tk()
@@ -5450,8 +5750,9 @@ class Conversor:
 
 
 # =============================================================== atalhos
-ATALHOS_PADRAO = {"fsr": "f", "interp": "i"}
-ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)"}
+ATALHOS_PADRAO = {"fsr": "f", "interp": "i", "foto": "f12", "info": "tab"}
+ATALHOS_NOMES = {"fsr": "Ligar/desligar FSR (tela cheia)", "interp": "Trocar interpolação (tela cheia)",
+                 "foto": "Tirar foto da tela (tela cheia)", "info": "Mostrar informações (tela cheia)"}
 _TK_PARA_PYGAME = {"return": "return", "space": "space", "tab": "tab", "backspace": "backspace",
                    "insert": "insert", "delete": "delete", "home": "home", "end": "end", "prior": "page up",
                    "next": "page down", "up": "up", "down": "down", "left": "left", "right": "right",
@@ -8335,7 +8636,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self._janela_cfg = j
         j.title("Configurações")
         f_ = self.p.s / self.escala_base
-        j.geometry(f"{int(420 * f_)}x{int(720 * f_)}")
+        j.geometry(f"{int(420 * f_)}x{int(800 * f_)}")
         j.resizable(False, False)
         j.configure(fg_color="#0B1324")
         j.transient(self.root)
@@ -8436,7 +8737,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
             for k, v in novos.items():
                 self.cfg[f"atalho_{k}"] = v
             if getattr(self, "tl_gpu", None):
-                self.tl_gpu.trocar_atalhos({"fsr": self.atalho("fsr"), "interp": self.atalho("interp")})
+                self.tl_gpu.trocar_atalhos(self.atalhos_tela())
             self.salvar_cfg()
             j.destroy()
             if mudou_idioma:                 # refaz a interface já no idioma novo
@@ -8466,6 +8767,9 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
     def atalho(self, nome):
         return self.cfg.get(f"atalho_{nome}", ATALHOS_PADRAO[nome])
 
+    def atalhos_tela(self):
+        return {k: self.atalho(k) for k in ATALHOS_PADRAO}
+
     def nome_tecla(self, nome):
         return nome_bonito(self.atalho(nome))
 
@@ -8476,10 +8780,9 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         nome = tecla_tk_para_nome(e.keysym)
         gpu = getattr(self, "tl_gpu", None)
         if gpu and nome and not (e.state & 0x4 and e.state & 0x1):   # tela cheia aberta e o app em foco
-            if nome == self.atalho("fsr"):
-                return gpu.alternar_fsr()
-            if nome == self.atalho("interp"):
-                return gpu.proxima_interp()
+            for acao, func in gpu._acoes().items():
+                if nome == self.atalho(acao):
+                    return func()
 
     # ---------------- janela maximizada / redimensionada: a interface acompanha o tamanho
     def _janela_mudou(self, e):

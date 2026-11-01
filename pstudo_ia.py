@@ -310,12 +310,12 @@ def arrumar_deconv(w, b):
 class RifeGL:
     """Executa o RIFE 4.6 em um contexto ModernGL já criado (tela cheia do PSTudo ou teste sem janela)."""
 
-    def __init__(self, ctx, pesos=None, vagas=4):
+    def __init__(self, ctx, pesos=None, vagas=4, forcar_330=False):
         import moderngl
         self.n_vagas = vagas
         self.mgl = moderngl
         self.ctx = ctx
-        self.ssbo = ctx.version_code >= 430
+        self.ssbo = ctx.version_code >= 430 and not forcar_330   # forcar_330: testa o caminho das placas antigas
         camadas = ler_pesos(pesos) if not isinstance(pesos, list) else pesos
         partes, self.bases, pos = [], [], 0
         for tipo, cout, cin, passo, w, b in camadas:
@@ -342,6 +342,8 @@ class RifeGL:
 
     # ---- utilidades
     def _prog(self, chave, fonte, defs, comum=False):
+        # os tamanhos vão compilados no shader: cada tamanho de rede tem os seus programas
+        chave = (self.tam,) + chave
         p = self.progs.get(chave)
         if p is None:
             d = "".join(f"#define {k} {v}\n" for k, v in defs.items())
@@ -360,6 +362,7 @@ class RifeGL:
         return t, self.ctx.framebuffer(color_attachments=[t])
 
     def _rodar(self, chave, fbo, texs, **unis):
+        chave = (self.tam,) + chave
         p = self.progs[chave]
         for k, v in unis.items():
             p[k] = v
