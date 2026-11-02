@@ -557,6 +557,87 @@ def instalar_pkg_ps3(cfg, ftp, caminho, cancelar, nome="o pacote", pronto=None):
     raise RuntimeError(f"A instalação de {nome} não terminou em 30 minutos. Confira no PS3 em Package Manager.")
 
 
+ERROS_REDE = ftplib.all_errors + (OSError,)
+
+
+def enviar_com_retomada(ftp, cfg, local, remoto, tam, cb, cancelar, avisar=None, tentativas=4, inicio=0):
+    """Manda um arquivo; se a conexão cair, reconecta e continua de onde parou (REST do FTP).
+
+    cb(dados) é chamado a cada bloco enviado; cb(None, ajuste) corrige a contagem quando o que o PS3
+    confirmou é diferente do que já foi contado. Devolve a conexão em uso (pode ser uma nova)."""
+    contado = [0]            # bytes deste arquivo já passados para cb
+
+    def cb_(dados, ajuste=0):
+        contado[0] += len(dados) if dados is not None else ajuste
+        cb(dados, ajuste)
+
+    def acertar(confirmado):
+        if confirmado != contado[0]:
+            cb_(None, confirmado - contado[0])
+
+    if inicio:
+        acertar(inicio)
+    for tentativa in range(tentativas):
+        try:
+            with open(local, "rb") as f:
+                if inicio:
+                    f.seek(inicio)
+                    try:
+                        ftp.storbinary(f"STOR {remoto}", f, blocksize=BLOCO, callback=cb_, rest=inicio)
+                    except ftplib.error_perm as e:         # este servidor não aceita retomar: vai do zero
+                        if not str(e).startswith(("50", "45")):
+                            raise
+                        f.seek(0)
+                        inicio = 0
+                        acertar(0)
+                        ftp.storbinary(f"STOR {remoto}", f, blocksize=BLOCO, callback=cb_)
+                else:
+                    ftp.storbinary(f"STOR {remoto}", f, blocksize=BLOCO, callback=cb_)
+            acertar(tam)
+            return ftp
+        except Cancelado:
+            raise
+        except ERROS_REDE as e:
+            if tentativa == tentativas - 1:
+                raise
+            if avisar:
+                avisar("reconectando", (tentativa + 1, tentativas - 1))
+            try:
+                ftp.close()
+            except Exception:
+                pass
+            ftp = None
+            espera = time.time() + 3 * (tentativa + 1)
+            while time.time() < espera:
+                if cancelar.is_set():
+                    raise Cancelado()
+                time.sleep(0.2)
+            try:
+                ftp = _reconectar_esperando(cfg, cancelar)
+            except ERROS_REDE:
+                raise e
+            ja = tamanho_remoto(ftp, remoto) or 0
+            if ja > tam:
+                ja = 0
+            inicio = ja
+            acertar(ja)
+    return ftp
+
+
+def _reconectar_esperando(cfg, cancelar, segundos=20):
+    fim = time.time() + segundos
+    while True:
+        try:
+            return conectar(cfg)
+        except ERROS_REDE:
+            if time.time() > fim:
+                raise
+            for _ in range(10):
+                if cancelar.is_set():
+                    raise Cancelado()
+                time.sleep(0.2)
+
+
 def trabalho_envio(fila_jogos, cfg, cancelar, avisar):
     """Roda em outra thread. fila_jogos = [{'item','nome'}]."""
     ftp = None
@@ -574,20 +655,25 @@ def trabalho_envio(fila_jogos, cfg, cancelar, avisar):
                 if cancelar.is_set():
                     raise Cancelado()
                 criar_pastas(ftp, remoto, cache)
-                if pular and tamanho_remoto(ftp, remoto) == tam:
+                ja = tamanho_remoto(ftp, remoto) if pular else None
+                if ja == tam:
                     enviado += tam
                     avisar("progresso", (enviado, total, idx, len(planos), nome, inicio))
                     continue
+                # pela metade por causa de um envio anterior interrompido pelo PSTudo: continua de onde parou
+                parciais = cfg.setdefault("envios_parciais", {})
+                parcial = ja if ja and 0 < ja < tam and parciais.get(remoto) == tam else 0
+                parciais[remoto] = tam
 
-                def cb(dados, _nome=nome, _idx=idx):
+                def cb(dados, ajuste=0, _nome=nome, _idx=idx):
                     nonlocal enviado
                     if cancelar.is_set():
                         raise Cancelado()
-                    enviado += len(dados)
+                    enviado += len(dados) if dados is not None else ajuste
                     avisar("progresso", (enviado, total, _idx, len(planos), _nome, inicio))
 
-                with open(local, "rb") as f:
-                    ftp.storbinary(f"STOR {remoto}", f, blocksize=BLOCO, callback=cb)
+                ftp = enviar_com_retomada(ftp, cfg, local, remoto, tam, cb, cancelar, avisar, inicio=parcial)
+                parciais.pop(remoto, None)
         # .pkg mandado para /dev_hdd0/packages: o webMAN instala na hora, um de cada vez
         pkgs = [(nome, remoto) for nome, lista in planos for _l, remoto, _t in lista
                 if remoto.lower().endswith(".pkg") and remoto.startswith("/dev_hdd0/packages/")]
@@ -4496,14 +4582,70 @@ def escolher_padrao(nomes):
     return nomes[0] if nomes else None
 
 
+class AtrasoAudio:
+    """Fila circular que atrasa o áudio em alguns milissegundos (para acompanhar a fluidez com IA).
+
+    O atraso pedido muda aos poucos: a fila cresce ou encolhe 1 amostra a cada 16, sem estalos."""
+
+    def __init__(self, sr, canais, maximo=0.5):
+        import numpy as np
+        self.np = np
+        self.sr = sr
+        self.buf = np.zeros((int(sr * maximo) + 8192, canais), np.float32)
+        self.escrita = 0
+        self.atraso = 0                 # amostras atualmente na fila
+        self.alvo = 0
+
+    def pedir(self, segundos):
+        self.alvo = int(max(0.0, min(segundos, 0.5)) * self.sr)
+
+    def passar(self, entrada, saida):
+        np, buf, n = self.np, self.buf, len(entrada)
+        tam = len(buf)
+        pos = self.escrita
+        fim = pos + n
+        if fim <= tam:
+            buf[pos:fim] = entrada
+        else:
+            k = tam - pos
+            buf[pos:] = entrada[:k]
+            buf[:fim - tam] = entrada[k:]
+        self.escrita = fim % tam
+        # aproxima o atraso do alvo devagar: lê um pouco mais devagar ou mais rápido do que grava
+        dif = self.alvo - self.atraso
+        passo = max(-(n // 16), min(n // 16, dif))
+        ini = (self.escrita - n - self.atraso) % tam    # continua de onde a leitura anterior parou
+        self.atraso += passo
+        if passo:
+            tr = buf[(ini + np.arange(n - passo)) % tam]  # n-passo amostras viram n (estica/encolhe de leve)
+            x = np.linspace(0, len(tr) - 1, n)
+            i0 = np.floor(x).astype(int)
+            i1 = np.minimum(i0 + 1, len(tr) - 1)
+            a = (x - i0)[:, None]
+            saida[:] = tr[i0] * (1 - a) + tr[i1] * a
+        elif ini + n <= tam:
+            saida[:] = buf[ini:ini + n]
+        else:
+            k = tam - ini
+            saida[:k] = buf[ini:]
+            saida[k:] = buf[:n - k]
+
+
+def limitar(x, np):
+    """Limitador suave: acima de 1,0 (volume no máximo) comprime em vez de estourar."""
+    return np.where(np.abs(x) > 0.9, np.sign(x) * (0.9 + 0.1 * np.tanh((np.abs(x) - 0.9) / 0.1)), x)
+
+
 class Audio:
     """Passa o áudio da placa de captura para a saída padrão do PC."""
 
     def __init__(self, indices, volume):
         import sounddevice as sd
+        import numpy as np
         self.sd = sd
         self.volume = volume  # lista de 1 item, alterada pela interface
         self.stream = None
+        self.fila = None      # AtrasoAudio: atrasa o som junto com a imagem quando a fluidez está ligada
         erro = None
         for idx in indices:
             try:
@@ -4516,17 +4658,31 @@ class Audio:
                 canais = max(1, min(2, d["max_input_channels"], d_out["max_output_channels"]))
                 sr = int(d["default_samplerate"] or 48000)
 
-                def cb(indata, outdata, frames, t, status, _c=canais):
-                    outdata[:] = indata * self.volume[0]
+                fila = AtrasoAudio(sr, canais)
+
+                def cb(indata, outdata, frames, t, status, _f=fila):
+                    if _f.alvo or _f.atraso:
+                        _f.passar(indata, outdata)
+                        outdata *= self.volume[0]
+                    else:
+                        np.multiply(indata, self.volume[0], out=outdata)
+                    if self.volume[0] > 1.0:
+                        outdata[:] = limitar(outdata, np)
                 self.stream = sd.Stream(device=(idx, saida), samplerate=sr, channels=canais, dtype="float32",
                                         latency="low", callback=cb)
                 self.stream.start()
+                self.fila = fila
                 self.info = f"{api['name']} • {sr // 1000} kHz"
                 return
             except Exception as e:
                 erro = e
                 self.stream = None
         raise RuntimeError(f"não consegui abrir o áudio ({erro})")
+
+    def atrasar(self, segundos):
+        """Atrasa o som (0 = em dia com a placa) para ele bater com a imagem atrasada pela fluidez."""
+        if self.fila:
+            self.fila.pedir(segundos)
 
     def parar(self):
         if self.stream:
@@ -4946,6 +5102,9 @@ class Tela:
             return
         if getattr(self, "tl_gpu", None):
             cap.previa_tam = None          # a tela cheia está na frente: a prévia não gasta nada
+            if getattr(self, "tl_audio", None):    # o som espera a imagem quando a fluidez está ligada
+                g = self.tl_gpu
+                self.tl_audio.atrasar(g.atraso_ms / 1000 if g.interp_modo and not g.ia_falhou else 0.0)
             if self.aba == "tela" and (cap.n // 30) != getattr(self, "_tl_ult_info", -1):
                 self._tl_ult_info = cap.n // 30
                 self.c.itemconfig(self.tl_info, text=self._tl_texto_gpu(self.tl_gpu, cap))
@@ -5141,7 +5300,8 @@ class Tela:
         segmentado(INTERP_OPCOES, self.tl_interp, self._tl_mudou_interp)
         explica("Uma rede neural (RIFE) roda na sua placa de vídeo e cria os quadros que faltam entre dois quadros "
                 "do jogo. x2 dobra (30 → 60), x4 quadruplica e Nativo acompanha o Hz do seu monitor: é o mais "
-                "suave. Acrescenta cerca de 1 quadro do jogo de atraso. "
+                "suave. Acrescenta cerca de 1 quadro do jogo de atraso; o som é atrasado junto para continuar "
+                "sincronizado. "
                 f"Atalho na tela cheia: {self.nome_tecla('interp')}.")
         titulo("Precisão da IA", 12)
 
@@ -5217,6 +5377,8 @@ class Tela:
             def fechou(erro):
                 def na_tela():
                     self.tl_gpu = None
+                    if getattr(self, "tl_audio", None):
+                        self.tl_audio.atrasar(0.0)
                     if erro is not None:
                         self.tl_gpu_falhou = True
                         self._tl_cheia_tk()
@@ -8167,9 +8329,10 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
 
     def salvar_cfg(self):
         dados = {k: v for k, v in self.cfg.items() if k != "senha"}
-        try:
-            with open(CONFIG, "w", encoding="utf-8") as f:
+        try:                                 # grava num arquivo ao lado e troca: desligar no meio não corrompe
+            with open(CONFIG + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(dados, f)
+            os.replace(CONFIG + ".tmp", CONFIG)
         except OSError:
             pass
 
@@ -8495,6 +8658,7 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
         self.instalando_info = None
         self.envio_pendente = None
         self.cancelar.clear()
+        self.cfg.setdefault("envios_parciais", {})     # o mesmo dicionário vai para a thread (cópia rasa)
         self.salvar_cfg()
         self.tela_enviando()
         self._atualizar_aba_envio(0.0)
@@ -8557,6 +8721,12 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
             self.instalando_info = dados
             self._mostrar_instalando()
             return
+        if tipo == "reconectando":
+            if getattr(self, "vendo_envio", False):
+                vez, de = dados
+                self.c.itemconfig(self.tx_rest, text=f"A conexão caiu. Tentando de novo ({vez} de {de})… "
+                                                     "o envio continua de onde parou.")
+            return
         if tipo == "ps3":
             if dados:
                 self.cfg["ip"] = dados
@@ -8572,7 +8742,9 @@ class App(Extras, Console, Controles, Tela, Conversor, Updates, ControleRemoto, 
                 self.root.after(5000, self.buscar_ps3)
             else:
                 self.root.after(15000, self._loop_check)
-        elif tipo in ("fim", "erro", "cancelado") and self.aba != "enviar":
+        if tipo in ("fim", "erro", "cancelado"):
+            self.salvar_cfg()                            # guarda a lista de envios pela metade
+        if tipo in ("fim", "erro", "cancelado") and self.aba != "enviar":
             self.enviando = False
             if tipo != "fim":
                 self.instalando_info = None
